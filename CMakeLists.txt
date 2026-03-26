@@ -15,10 +15,6 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src
 )
 
-# Find GGML libraries
-find_library(GGML_LIBRARY NAMES ggml PATHS ${GGML_DIR}/build/lib NO_DEFAULT_PATH)
-find_library(GGML_CUBLAS_LIBRARY NAMES ggml_cublas PATHS ${GGML_DIR}/build/lib NO_DEFAULT_PATH)
-
 # Source files
 file(GLOB SOURCES
     src/*.cpp
@@ -27,10 +23,10 @@ file(GLOB SOURCES
 # Executable
 add_executable(gpt2 ${SOURCES})
 
-# Link libraries
+# Link GGML (use cmake exported targets from GGML build)
 target_link_libraries(gpt2
-    ${GGML_LIBRARY}
-    ${GGML_CUBLAS_LIBRARY}
+    ggml
+    ggml_cuda
     cublas
     pthread
     m
