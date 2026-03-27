@@ -28,8 +28,8 @@ struct KVCacheEntry {
 // Manages KV caches for all transformer layers
 class KVCache {
 public:
-    static constexpr int N_LAYERS = 36;  // GPT-2 Large
-    static constexpr int N_HEADS = 20;
+    static constexpr int N_LAYERS = 12;  // GPT-2 base
+    static constexpr int N_HEADS = 12;
     static constexpr int HEAD_DIM = 64;
     static constexpr int MAX_SEQ_LEN = 1024;
 

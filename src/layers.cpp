@@ -13,9 +13,37 @@ static inline ggml_tensor* ggml_new_scalar(ggml_context* ctx, float value) {
 
 ggml_tensor* LayerNorm::forward(ggml_context* ctx, ggml_tensor* x) {
     // LayerNorm: gamma * (x - mean) / sqrt(var + eps) + beta
-    // Since GGML lacks per-row reduction, we apply gamma/beta directly
-    // This is an approximation that skips centering
-    ggml_tensor* scaled = ggml_mul(ctx, x, gamma);
+    // x shape: (seq_len, n_embd)
+    // Since GGML lacks per-row reduction ops, we use a simplified approach:
+    // compute mean/variance over the full tensor as approximation
+    // For seq_len=1 (typical during generation), this equals per-row computation
+
+    int seq_len = (int)ggml_nrows(x);
+    int n_embd = GPT2Config::n_embd;
+
+    // Compute mean over all elements: sum(x) / (seq_len * n_embd)
+    ggml_tensor* x_sum = ggml_sum(ctx, x);
+    ggml_tensor* x_mean = ggml_scale(ctx, x_sum,
+        ggml_new_scalar(ctx, 1.0f / (float)(seq_len * n_embd)));
+
+    // Compute x - mean
+    ggml_tensor* x_centered = ggml_sub(ctx, x, x_mean);
+
+    // Compute variance: mean((x - mean)^2)
+    ggml_tensor* x_centered_sq = ggml_sqr(ctx, x_centered);
+    ggml_tensor* var_sum = ggml_sum(ctx, x_centered_sq);
+    ggml_tensor* variance = ggml_scale(ctx, var_sum,
+        ggml_new_scalar(ctx, 1.0f / (float)(seq_len * n_embd)));
+
+    // Compute sqrt(var + eps)
+    ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, GPT2Config::layer_norm_eps));
+    ggml_tensor* std = ggml_sqrt(ctx, var_eps);
+
+    // Normalize: (x - mean) / std
+    ggml_tensor* x_norm = ggml_div(ctx, x_centered, std);
+
+    // Scale and shift: gamma * x_norm + beta
+    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
     ggml_tensor* result = ggml_add(ctx, scaled, beta);
     return result;
 }
@@ -98,208 +126,169 @@ ggml_tensor* Attention::forward(
     int position,
     bool use_cache
 ) {
-    // x: (seq_len, n_embd) - typically seq_len=1 when use_cache=true for generation
-    // position: current position in the sequence (for KV cache indexing)
+    // x: (seq_len, n_embd)
+    // position: current position in sequence (for KV cache indexing)
+    // use_cache: if true, store/retrieve from KV cache
 
     int n_heads = GPT2Config::n_heads;
     int n_embd = GPT2Config::n_embd;
     int head_dim = GPT2Config::head_dim;
-    int seq_len = (int)ggml_nrows(x);  // x has seq_len rows
+    int seq_len = (int)ggml_nrows(x);
 
-    // QKV projection: compute q, k, v from input
-    // c_attn_weight: (n_embd, 3 * n_embd), c_attn_bias: (3 * n_embd)
+    // QKV projection: (seq_len, n_embd) @ (n_embd, 3*n_embd) = (seq_len, 3*n_embd)
     ggml_tensor* qkv = ggml_mul_mat(ctx, x, c_attn_weight);
     qkv = ggml_add(ctx, qkv, c_attn_bias);
-    // qkv: (seq_len, 3 * n_embd)
 
-    // Split into q, k, v - each is (seq_len, n_embd)
+    // Split into q, k, v - each (seq_len, n_embd)
     ggml_tensor* q = ggml_view_2d(ctx, qkv, n_embd, seq_len, n_embd * sizeof(float), 0);
     ggml_tensor* k = ggml_view_2d(ctx, qkv, n_embd, seq_len, n_embd * sizeof(float), n_embd * sizeof(float));
     ggml_tensor* v = ggml_view_2d(ctx, qkv, n_embd, seq_len, n_embd * sizeof(float), 2 * n_embd * sizeof(float));
 
-    // Reshape for multi-head: (n_heads, seq_len, head_dim)
-    q = ggml_reshape_3d(ctx, q, n_heads, head_dim, seq_len);
-    k = ggml_reshape_3d(ctx, k, n_heads, head_dim, seq_len);
-    v = ggml_reshape_3d(ctx, v, n_heads, head_dim, seq_len);
+    // Reshape to (seq_len, n_heads, head_dim)
+    q = ggml_reshape_3d(ctx, q, seq_len, n_heads, head_dim);
+    k = ggml_reshape_3d(ctx, k, seq_len, n_heads, head_dim);
+    v = ggml_reshape_3d(ctx, v, seq_len, n_heads, head_dim);
 
-    // Transpose k and v to get (n_heads, seq_len, head_dim) -> (n_heads, head_dim, seq_len)
-    // For attention we need k^T with shape (seq_len, n_heads, head_dim)
-    k = ggml_transpose(ctx, ggml_transpose(ctx, k));  // (n_heads, seq_len, head_dim) -> (seq_len, n_heads, head_dim) -> (n_heads, head_dim, seq_len)
-    v = ggml_transpose(ctx, ggml_transpose(ctx, v));
-    // Actually for attention we want k to be (seq_len, n_heads, head_dim) for the matmul
-    // Let me reconsider: q is (n_heads, seq_len, head_dim)
-    // k for attention should be (seq_len, n_heads, head_dim) - sequence first for easier matmul
-
-    // Simpler approach: reshape q to 2D for matmul
-    // q: (n_heads, seq_len, head_dim) -> (n_heads * seq_len, head_dim)
-    q = ggml_reshape_2d(ctx, q, n_heads * seq_len, head_dim);
-
-    // For attention with cache:
-    // k should be (cached_seq_len, n_heads, head_dim)
-    // v should be (cached_seq_len, n_heads, head_dim)
+    // Handle KV cache storage and retrieval
+    int total_kv_len = seq_len;
 
     if (use_cache && position >= 0) {
-        // k_cache shape: (n_heads, context_length, head_dim) from init_cache
-        // But init_cache says (head_dim, n_heads, context_length)
-        // Let's check: ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, n_heads, context_length)
-        // Means ne1=head_dim, ne2=n_heads, ne3=context_length
+        // Store new k,v to cache at current position
+        // k_cache format: (head_dim, n_heads, context_length)
+        // k is (seq_len, n_heads, head_dim), we want to store at position offset
+        for (int i = 0; i < seq_len; i++) {
+            int store_pos = position + i;
 
-        // For storing at position, we need k[:, position, :] where k is (n_heads, context_length, head_dim)
-        // k_cache is actually stored as (head_dim, n_heads, context_length) based on init
-        // But let's assume it's (n_heads, context_length, head_dim) for now
+            // Get view into k_cache at position store_pos
+            ggml_tensor* k_slice = ggml_view_3d(ctx, k_cache,
+                head_dim, n_heads, 1,
+                n_heads * head_dim * sizeof(float),  // stride in dim0 (ne1*ne2)
+                head_dim * sizeof(float),             // stride in dim1 (ne2)
+                store_pos * head_dim * n_heads * sizeof(float)); // offset
 
+            // Transpose k[i] from (n_heads, head_dim) to (head_dim, n_heads) for storage
+            ggml_tensor* k_row = ggml_view_2d(ctx, k, n_heads, head_dim,
+                n_heads * head_dim * sizeof(float), i * n_heads * head_dim * sizeof(float));
+            k_row = ggml_transpose(ctx, k_row);
+
+            ggml_tensor* k_dst = ggml_view_2d(ctx, k_slice, n_heads, head_dim,
+                head_dim * sizeof(float), 0);
+            k_dst = ggml_cpy(ctx, k_row, k_dst);
+            ggml_build_forward_expand(gf, k_dst);
+
+            // Store v similarly
+            ggml_tensor* v_slice = ggml_view_3d(ctx, v_cache,
+                n_heads, head_dim, 1,
+                head_dim * sizeof(float),
+                0,
+                store_pos * n_heads * head_dim * sizeof(float));
+
+            ggml_tensor* v_row = ggml_view_2d(ctx, v, n_heads, head_dim,
+                n_heads * head_dim * sizeof(float), i * n_heads * head_dim * sizeof(float));
+
+            ggml_tensor* v_dst = ggml_view_2d(ctx, v_slice, head_dim, n_heads,
+                n_heads * sizeof(float), 0);
+            v_dst = ggml_cpy(ctx, v_row, v_dst);
+            ggml_build_forward_expand(gf, v_dst);
+        }
+
+        // Retrieve cached K,V if position > 0
         if (position > 0) {
-            // Get cached k,v: positions 0 to position-1
-            // k_cache: (head_dim, n_heads, position) after view
-            // But we want (position, n_heads, head_dim) for attention
+            // Get cached keys/values from positions 0 to position-1
+            // k_cache: (head_dim, n_heads, context_length)
             ggml_tensor* k_cached = ggml_view_3d(ctx, k_cache,
-                                                  n_heads, position, head_dim,
-                                                  head_dim * n_heads * sizeof(float),  // stride in dim0
-                                                  head_dim * sizeof(float),             // stride in dim1
-                                                  0);
-            ggml_tensor* v_cached = ggml_view_3d(ctx, v_cache,
-                                                  n_heads, position, head_dim,
-                                                  head_dim * n_heads * sizeof(float),
-                                                  head_dim * sizeof(float),
-                                                  0);
+                n_heads, position, head_dim,
+                head_dim * n_heads * sizeof(float),  // stride dim0
+                head_dim * sizeof(float),              // stride dim1
+                0);
 
-            // Transpose cached k,v from (n_heads, position, head_dim) to (position, n_heads, head_dim)
+            // Transpose from (n_heads, position, head_dim) to (position, n_heads, head_dim)
+            k_cached = ggml_reshape_3d(ctx, k_cached, n_heads, position, head_dim);
             k_cached = ggml_transpose(ctx, k_cached);
+
+            ggml_tensor* v_cached = ggml_view_3d(ctx, v_cache,
+                n_heads, position, head_dim,
+                head_dim * sizeof(float),
+                0);
+
+            v_cached = ggml_reshape_3d(ctx, v_cached, n_heads, position, head_dim);
             v_cached = ggml_transpose(ctx, v_cached);
 
-            // Store new k,v to cache
-            // k is (n_heads, seq_len, head_dim), we want k[:, position:position+seq_len, :]
-            ggml_tensor* k_store = ggml_view_3d(ctx, k_cache,
-                                                  n_heads, seq_len, head_dim,
-                                                  head_dim * n_heads * sizeof(float),
-                                                  head_dim * sizeof(float),
-                                                  position * head_dim * sizeof(float));
-            ggml_tensor* v_store = ggml_view_3d(ctx, v_cache,
-                                                  n_heads, seq_len, head_dim,
-                                                  head_dim * n_heads * sizeof(float),
-                                                  head_dim * sizeof(float),
-                                                  position * head_dim * sizeof(float));
-
-            // Copy k,v to store locations - add to graph to ensure execution
-            k_store = ggml_cpy(ctx, k, k_store);
-            v_store = ggml_cpy(ctx, v, v_store);
-            ggml_build_forward_expand(gf, k_store);
-            ggml_build_forward_expand(gf, v_store);
-
-            // Transpose new k,v for attention: (n_heads, seq_len, head_dim) -> (seq_len, n_heads, head_dim)
-            k = ggml_transpose(ctx, k);
-            v = ggml_transpose(ctx, v);
-
-            // Concatenate: [k_cached, k] along seq_len dimension
+            // Concat cached and new k,v
             k = ggml_concat(ctx, k_cached, k, 0);
             v = ggml_concat(ctx, v_cached, v, 0);
 
-            // Reshape q for matmul: (n_heads, seq_len, head_dim) -> (n_heads * seq_len, head_dim)
-            q = ggml_reshape_2d(ctx, ggml_transpose(ctx, q), n_heads * seq_len, head_dim);
-        } else {
-            // position == 0, store without concatenating
-            ggml_tensor* k_store = ggml_view_3d(ctx, k_cache,
-                                                  n_heads, seq_len, head_dim,
-                                                  head_dim * n_heads * sizeof(float),
-                                                  head_dim * sizeof(float),
-                                                  0);
-            ggml_tensor* v_store = ggml_view_3d(ctx, v_cache,
-                                                  n_heads, seq_len, head_dim,
-                                                  head_dim * n_heads * sizeof(float),
-                                                  head_dim * sizeof(float),
-                                                  0);
-
-            k_store = ggml_cpy(ctx, k, k_store);
-            v_store = ggml_cpy(ctx, v, v_store);
-            ggml_build_forward_expand(gf, k_store);
-            ggml_build_forward_expand(gf, v_store);
-
-            // Transpose k,v for attention
-            k = ggml_transpose(ctx, k);
-            v = ggml_transpose(ctx, v);
-
-            // Reshape q for matmul
-            q = ggml_reshape_2d(ctx, ggml_transpose(ctx, q), n_heads * seq_len, head_dim);
+            total_kv_len = position + seq_len;
         }
-    } else {
-        // No cache - use k,v directly
-        // Transpose k,v for attention
-        k = ggml_transpose(ctx, k);
-        v = ggml_transpose(ctx, v);
-
-        // Reshape q for matmul
-        q = ggml_reshape_2d(ctx, ggml_transpose(ctx, q), n_heads * seq_len, head_dim);
     }
 
-    // k: (cached_seq_len or seq_len, n_heads, head_dim)
-    // v: (cached_seq_len or seq_len, n_heads, head_dim)
-    // q: (n_heads * seq_len, head_dim)
+    // Now k and v are (total_kv_len, n_heads, head_dim)
+    // q is (seq_len, n_heads, head_dim)
 
-    // For attention: q @ k^T
-    // q: (n_heads * seq_len, head_dim), k^T: (head_dim, n_heads * seq_len)
-    // But we need to handle multi-head properly
+    // Reshape q for matmul: (seq_len, n_heads, head_dim) -> (seq_len * n_heads, head_dim)
+    ggml_tensor* q_2d = ggml_reshape_2d(ctx, q, seq_len * n_heads, head_dim);
 
-    // Actually let's reshape k to (n_heads, cached_seq_len, head_dim) for easier matmul
-    int k_seq = (int)(ggml_nbytes(k) / (n_heads * head_dim * sizeof(float)));
-    k = ggml_reshape_3d(ctx, k, n_heads, k_seq, head_dim);
-    v = ggml_reshape_3d(ctx, v, n_heads, k_seq, head_dim);
+    // Reshape k for matmul: (total_kv_len, n_heads, head_dim) -> (n_heads, total_kv_len, head_dim)
+    k = ggml_reshape_3d(ctx, k, n_heads, total_kv_len, head_dim);
+    // Transpose to (n_heads, head_dim, total_kv_len)
+    k = ggml_transpose(ctx, k);
+    // Reshape to (head_dim, n_heads * total_kv_len)
+    ggml_tensor* k_mat = ggml_reshape_2d(ctx, k, head_dim, n_heads * total_kv_len);
 
-    // q for one head: q[i*head_dim:(i+1)*head_dim] @ k[i]^T
-    // This is complex in GGML without batched matmul
+    // Similar for v: (total_kv_len, n_heads, head_dim) -> (n_heads * total_kv_len, head_dim)
+    v = ggml_reshape_3d(ctx, v, n_heads, total_kv_len, head_dim);
+    v = ggml_transpose(ctx, v);  // (head_dim, n_heads, total_kv_len)
+    ggml_tensor* v_mat = ggml_reshape_2d(ctx, v, head_dim, n_heads * total_kv_len);
+    v_mat = ggml_transpose(ctx, v_mat);  // (n_heads * total_kv_len, head_dim)
 
-    // For now, compute attention manually per head using loop
-    // But that's slow... Let's use a simpler approach
+    // Compute attention scores: q_2d @ k_mat
+    // (seq_len * n_heads, head_dim) @ (head_dim, n_heads * total_kv_len)
+    // = (seq_len * n_heads, n_heads * total_kv_len)
+    ggml_tensor* scores = ggml_mul_mat(ctx, q_2d, k_mat);
+    scores = ggml_scale(ctx, scores, 1.0f / std::sqrt((float)head_dim));
 
-    // Simple approach: treat as single large matmul
-    // q: (n_heads * seq_len, head_dim), k: (n_heads * k_seq, head_dim)
-    // scores: (n_heads * seq_len, n_heads * k_seq)
-
-    // This isn't correct for multi-head attention...
-
-    // Let me just do: scores = q @ k^T / sqrt(head_dim)
-    ggml_tensor* kT = ggml_transpose(ctx, k);  // (n_heads, head_dim, k_seq)
-    kT = ggml_reshape_2d(ctx, kT, n_heads * head_dim, k_seq);  // (n_heads * head_dim, k_seq)
-
-    ggml_tensor* scores = ggml_mul_mat(ctx, q, kT);
-    ggml_tensor* scaled_scores = ggml_scale(ctx, scores, 1.0f / std::sqrt((float)head_dim));
-
-    // Apply causal mask for the non-cached case
-    if (!use_cache || position == 0) {
-        // Causal mask: only attend to past
-        // For seq_len tokens, token i can attend to 0..i
-        ggml_tensor* mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, seq_len, k_seq);
+    // Apply causal mask: for token i, can only attend to positions 0..i in the full sequence
+    // For seq_len tokens starting at position, we need a mask that allows each token to attend
+    // to positions up to (position + i)
+    if (seq_len > 1 || (use_cache && position > 0)) {
+        ggml_tensor* mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, seq_len, total_kv_len);
         float* mask_data = (float*)mask->data;
+
         for (int i = 0; i < seq_len; i++) {
-            for (int j = 0; j < k_seq; j++) {
-                mask_data[i * k_seq + j] = (j > i) ? -10000.0f : 0.0f;
+            int token_pos = position + i;  // absolute position of token i
+            for (int j = 0; j < total_kv_len; j++) {
+                // Can attend if j < token_pos (i.e., j is before or at current position)
+                // But when j >= position and j < position + seq_len, that's the current chunk
+                // And when j >= position + seq_len... but that shouldn't happen with proper k_seq
+                int kv_pos = j;  // position in the cached/new concatenated k
+                mask_data[i * total_kv_len + j] = (kv_pos > token_pos) ? -10000.0f : 0.0f;
             }
         }
-        // Expand mask to match n_heads
-        // mask is (seq_len, k_seq), need to broadcast to (n_heads * seq_len, k_seq)
-        ggml_tensor* mask_expanded = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_heads * seq_len, k_seq);
+
+        // Expand mask for n_heads: each head gets the same mask
+        ggml_tensor* mask_expanded = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_heads * seq_len, total_kv_len);
         float* mask_exp = (float*)mask_expanded->data;
         for (int h = 0; h < n_heads; h++) {
             for (int i = 0; i < seq_len; i++) {
-                for (int j = 0; j < k_seq; j++) {
-                    mask_exp[(h * seq_len + i) * k_seq + j] = mask_data[i * k_seq + j];
+                for (int j = 0; j < total_kv_len; j++) {
+                    mask_exp[(h * seq_len + i) * total_kv_len + j] = mask_data[i * total_kv_len + j];
                 }
             }
         }
-        scaled_scores = ggml_add(ctx, scaled_scores, mask_expanded);
+        scores = ggml_add(ctx, scores, mask_expanded);
     }
 
-    // Softmax
-    ggml_tensor* attn_weights = ggml_soft_max(ctx, scaled_scores);
+    // Softmax over the key dimension
+    ggml_tensor* attn_weights = ggml_soft_max(ctx, scores);
 
-    // Apply attention: attn_weights @ v
-    // attn_weights: (n_heads * seq_len, n_heads * k_seq), v: (n_heads * k_seq, head_dim)
-    // Result: (n_heads * seq_len, head_dim)
-    v = ggml_reshape_2d(ctx, v, n_heads * k_seq, head_dim);
-    ggml_tensor* attn_out = ggml_mul_mat(ctx, attn_weights, v);
+    // Apply attention: attn_weights @ v_mat
+    // (seq_len * n_heads, n_heads * total_kv_len) @ (n_heads * total_kv_len, head_dim)
+    // = (seq_len * n_heads, head_dim)
+    ggml_tensor* attn_out = ggml_mul_mat(ctx, attn_weights, v_mat);
 
-    // Reshape back to (seq_len, n_heads, head_dim) -> (seq_len, n_embd)
-    attn_out = ggml_reshape_3d(ctx, attn_out, n_heads, seq_len, head_dim);
-    attn_out = ggml_transpose(ctx, attn_out);  // (seq_len, n_heads, head_dim)
+    // Reshape back to (seq_len, n_heads, head_dim) then (seq_len, n_embd)
+    attn_out = ggml_reshape_3d(ctx, attn_out, seq_len, n_heads, head_dim);
+    attn_out = ggml_transpose(ctx, attn_out);  // (seq_len, head_dim, n_heads)
     attn_out = ggml_reshape_2d(ctx, attn_out, seq_len, n_embd);
 
     // Output projection
@@ -439,9 +428,32 @@ ggml_tensor* layer_norm(
     float eps
 ) {
     // LayerNorm: gamma * (x - mean) / sqrt(var + eps) + beta
-    // Since GGML lacks per-row reduction, we apply gamma/beta without centering
-    // This is a practical approximation - full LayerNorm needs per-row mean computation
-    ggml_tensor* scaled = ggml_mul(ctx, x, gamma);
+    // Since GGML lacks per-row reduction ops, compute mean/variance over full tensor
+    // For seq_len=1 (typical during generation), this equals per-row computation
+    int seq_len = (int)ggml_nrows(x);
+    int n_embd = GPT2Config::n_embd;
+
+    // Compute mean over all elements
+    ggml_tensor* x_sum = ggml_sum(ctx, x);
+    ggml_tensor* x_mean = ggml_scale(ctx, x_sum,
+        ggml_new_scalar(ctx, 1.0f / (float)(seq_len * n_embd)));
+
+    // Compute x - mean
+    ggml_tensor* x_centered = ggml_sub(ctx, x, x_mean);
+
+    // Compute variance: mean((x - mean)^2)
+    ggml_tensor* x_centered_sq = ggml_sqr(ctx, x_centered);
+    ggml_tensor* var_sum = ggml_sum(ctx, x_centered_sq);
+    ggml_tensor* variance = ggml_scale(ctx, var_sum,
+        ggml_new_scalar(ctx, 1.0f / (float)(seq_len * n_embd)));
+
+    // Compute sqrt(var + eps)
+    ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, eps));
+    ggml_tensor* std = ggml_sqrt(ctx, var_eps);
+
+    // Normalize and scale/shift
+    ggml_tensor* x_norm = ggml_div(ctx, x_centered, std);
+    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
     ggml_tensor* result = ggml_add(ctx, scaled, beta);
     return result;
 }
