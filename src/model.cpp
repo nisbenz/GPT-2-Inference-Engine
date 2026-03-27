@@ -35,7 +35,7 @@ bool GPT2Model::init(bool use_gpu) {
 
     // Initialize GGML
     struct ggml_init_params params = {
-        .mem_size   = 2048 * 1024 * 1024,  // 2 GB
+        .mem_size   = static_cast<size_t>(512) * 1024 * 1024,  // 512 MB
         .mem_buffer = nullptr,
         .no_alloc   = false,
     };
