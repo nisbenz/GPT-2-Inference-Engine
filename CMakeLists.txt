@@ -47,10 +47,10 @@ file(GLOB SOURCES
 # Executable
 add_executable(gpt2 ${SOURCES})
 
-# Link GGML libraries
+# Link GGML libraries (order matters: ggml-cuda depends on ggml)
 target_link_libraries(gpt2
-    ${GGML_LIBRARY}
     ${GGML_CUDA_LIBRARY}
+    ${GGML_LIBRARY}
     ${CUDA_LIBRARIES}
     pthread
     m

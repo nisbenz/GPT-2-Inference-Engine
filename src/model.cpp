@@ -246,15 +246,8 @@ bool GPT2Model::load_huggingface_weights(const std::string& path) {
 bool GPT2Model::load_gguf_weights(const std::string& path) {
     std::cout << "Loading GGUF model from: " << path << std::endl;
 
-    // Load GGUF file using ggml_init_from_file
-    struct ggml_context* meta_ctx = ggml_init_from_file(path.c_str(), {0});
-    if (!meta_ctx) {
-        std::cerr << "Failed to load GGUF file: " << path << std::endl;
-        return false;
-    }
-
     // For now, use random initialization since GGUF loading API varies by version
-    // The actual tensor loading from GGUF requires matching the exact API version
+    // The actual tensor loading from GGUF requires matching the exact GGML/GGUF API version
     std::cout << "Note: Using random initialization (GGUF loading requires API version check)" << std::endl;
 
     // Random initialization for testing
@@ -317,8 +310,6 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
         ln_fg[j] = (j == 0) ? 1.0f : 0.0f;
         ln_fb[j] = 0.0f;
     }
-
-    ggml_free(meta_ctx);
 
     std::cout << "Model initialized with random weights (GGUF loading simplified)" << std::endl;
     return true;
