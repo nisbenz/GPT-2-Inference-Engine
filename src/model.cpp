@@ -250,6 +250,7 @@ bool GPT2Model::load_huggingface_weights(const std::string& path) {
 // Forward declarations for helper functions
 static size_t extract_layer_idx(const std::string& name);
 static float fp16_to_fp32(uint16_t f16);
+static float bf16_to_fp32(uint16_t bf16);
 
 bool GPT2Model::load_gguf_weights(const std::string& path) {
     std::cout << "Loading GGUF model from: " << path << std::endl;
@@ -298,13 +299,13 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
             ggml_tensor* dst = nullptr;
 
             // Build a lookup map based on tensor name patterns
-            if (t.name == "model.wte" || t.name == "model.embed_tokens") {
+            if (t.name == "model.wte" || t.name == "model.embed_tokens" || t.name == "token_embd.weight") {
                 dst = wte_;
-            } else if (t.name == "model.wpe" || t.name == "model.position_embeddings") {
+            } else if (t.name == "model.wpe" || t.name == "model.position_embeddings" || t.name == "pos_embd.weight") {
                 dst = wpe_;
-            } else if (t.name == "model.ln_f.weight" || t.name == "model.final_layernorm.weight") {
+            } else if (t.name == "model.ln_f.weight" || t.name == "model.final_layernorm.weight" || t.name == "model.ln_f.g" || t.name == "output_norm.weight") {
                 dst = ln_f_.gamma;
-            } else if (t.name == "model.ln_f.bias" || t.name == "model.final_layernorm.bias") {
+            } else if (t.name == "model.ln_f.bias" || t.name == "model.final_layernorm.bias" || t.name == "model.ln_f.b" || t.name == "output_norm.bias") {
                 dst = ln_f_.beta;
             } else if (t.name.find(".attn.c_attn.weight") != std::string::npos ||
                        t.name.find(".attention.c_attn.weight") != std::string::npos) {
@@ -377,6 +378,38 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                 }
             }
 
+            // GGUF blk.X patterns (llama.cpp style)
+            else if (t.name.find(".blk.") != std::string::npos) {
+                size_t layer_idx = extract_layer_idx(t.name);
+                if (layer_idx < N_LAYERS) {
+                    if (t.name.find(".attn_qkv.weight") != std::string::npos) {
+                        dst = layers_[layer_idx].attention.c_attn_weight;
+                    } else if (t.name.find(".attn_qkv.bias") != std::string::npos) {
+                        dst = layers_[layer_idx].attention.c_attn_bias;
+                    } else if (t.name.find(".attn_output.weight") != std::string::npos) {
+                        dst = layers_[layer_idx].attention.c_proj_weight;
+                    } else if (t.name.find(".attn_output.bias") != std::string::npos) {
+                        dst = layers_[layer_idx].attention.c_proj_bias;
+                    } else if (t.name.find(".attn_norm.weight") != std::string::npos) {
+                        dst = layers_[layer_idx].ln1.gamma;
+                    } else if (t.name.find(".attn_norm.bias") != std::string::npos) {
+                        dst = layers_[layer_idx].ln1.beta;
+                    } else if (t.name.find(".ffn_norm.weight") != std::string::npos) {
+                        dst = layers_[layer_idx].ln2.gamma;
+                    } else if (t.name.find(".ffn_norm.bias") != std::string::npos) {
+                        dst = layers_[layer_idx].ln2.beta;
+                    } else if (t.name.find(".ffn_up.weight") != std::string::npos) {
+                        dst = layers_[layer_idx].ffn.c_fc_weight;
+                    } else if (t.name.find(".ffn_up.bias") != std::string::npos) {
+                        dst = layers_[layer_idx].ffn.c_fc_bias;
+                    } else if (t.name.find(".ffn_down.weight") != std::string::npos) {
+                        dst = layers_[layer_idx].ffn.c_proj_weight;
+                    } else if (t.name.find(".ffn_down.bias") != std::string::npos) {
+                        dst = layers_[layer_idx].ffn.c_proj_bias;
+                    }
+                }
+            }
+
             if (dst) {
                 // Calculate expected size
                 size_t expected_nbytes = ggml_nbytes(dst);
@@ -400,6 +433,15 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                         // Q4_K_M quantization - needs special dequantization
                         std::cout << "  Warning: Q4_K tensor '" << t.name << "' needs dequantization, using random" << std::endl;
                         failed++;
+                    } else if (t.type == GGUF_TID_BF16 || t.type == 30) {
+                        // BF16 type - convert to F32
+                        std::vector<uint16_t> bf16_data(actual_nbytes / 2);
+                        read_tensor_data(gguf, t, bf16_data.data(), actual_nbytes);
+                        auto* dst_f = (float*)dst->data;
+                        for (size_t j = 0; j < bf16_data.size(); j++) {
+                            dst_f[j] = bf16_to_fp32(bf16_data[j]);
+                        }
+                        loaded++;
                     } else {
                         std::cout << "  Warning: Unsupported type " << t.type << " for tensor '" << t.name << "'" << std::endl;
                         failed++;
@@ -470,12 +512,22 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
     }
 }
 
-// Helper to extract layer index from tensor name like "model.h.0.attn.c_attn.weight"
+// Helper to extract layer index from tensor name
+// Handles both "model.h.0.xxx" and "blk.0.xxx" patterns
 static size_t extract_layer_idx(const std::string& name) {
-    // Find .h. pattern
+    // Find .h. pattern (HuggingFace style)
     size_t h_pos = name.find(".h.");
     if (h_pos != std::string::npos) {
         size_t start = h_pos + 3;
+        size_t end = name.find('.', start);
+        if (end != std::string::npos) {
+            return std::stoi(name.substr(start, end - start));
+        }
+    }
+    // Find blk. pattern (llama.cpp style)
+    size_t blk_pos = name.find("blk.");
+    if (blk_pos != std::string::npos) {
+        size_t start = blk_pos + 4;
         size_t end = name.find('.', start);
         if (end != std::string::npos) {
             return std::stoi(name.substr(start, end - start));
@@ -500,6 +552,26 @@ static float fp16_to_fp32(uint16_t f16) {
 
     int32_t e = exp - 15;
     float m = 1.0f + mant / 1024.0f;
+    return sign ? -pow(2, e) * m : pow(2, e) * m;
+}
+
+// BF16 (Brain Float 16) to FP32 conversion
+// BF16: 1 sign bit, 8 exponent bits, 7 mantissa bits
+static float bf16_to_fp32(uint16_t bf16) {
+    unsigned int sign = (bf16 >> 15) & 0x1;
+    unsigned int exp = (bf16 >> 7) & 0xff;
+    unsigned int mant = bf16 & 0x7f;
+
+    if (exp == 0) {
+        if (mant == 0) return sign ? -0.0f : 0.0f;
+        else return sign ? -pow(2, -126) * (mant / 128.0f) : pow(2, -126) * (mant / 128.0f);
+    } else if (exp == 255) {
+        if (mant == 0) return sign ? -INFINITY : INFINITY;
+        else return NAN;
+    }
+
+    int32_t e = exp - 127;
+    float m = 1.0f + mant / 128.0f;
     return sign ? -pow(2, e) * m : pow(2, e) * m;
 }
 
