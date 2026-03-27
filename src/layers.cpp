@@ -13,36 +13,49 @@ static inline ggml_tensor* ggml_new_scalar(ggml_context* ctx, float value) {
 
 ggml_tensor* LayerNorm::forward(ggml_context* ctx, ggml_tensor* x) {
     // LayerNorm: gamma * (x - mean) / sqrt(var + eps) + beta
-    // x shape: (n_rows, n_cols) = (seq_len, n_embd)
+    // x shape: (seq_len, n_embd) = (n_rows, n_cols)
 
     int n_rows = (int)x->ne[0];
     int n_cols = (int)x->ne[1];
+    int n = n_rows * n_cols;
 
-    // Compute mean over all elements
-    ggml_tensor* x_sum = ggml_sum(ctx, x);
-    ggml_tensor* x_mean = ggml_scale(ctx, x_sum, 1.0f / (float)(n_rows * n_cols));
+    // Make x contiguous and flatten to 1D
+    ggml_tensor* x_cont = ggml_cont(ctx, x);
+    ggml_tensor* x_flat = ggml_reshape_1d(ctx, x_cont, n);
 
-    // Compute x - mean and variance
-    ggml_tensor* x_centered = ggml_sub(ctx, x, x_mean);
+    // Compute sum and mean in 1D
+    ggml_tensor* x_sum = ggml_sum(ctx, x_flat);
+    ggml_tensor* mean = ggml_scale(ctx, x_sum, 1.0f / (float)n);
+
+    // Center: x - mean
+    ggml_tensor* x_centered = ggml_sub(ctx, x_flat, mean);
+
+    // Square and compute variance
     ggml_tensor* x_centered_sq = ggml_sqr(ctx, x_centered);
     ggml_tensor* var_sum = ggml_sum(ctx, x_centered_sq);
-    ggml_tensor* variance = ggml_scale(ctx, var_sum, 1.0f / (float)(n_rows * n_cols));
+    ggml_tensor* variance = ggml_scale(ctx, var_sum, 1.0f / (float)n);
 
-    // Compute std = sqrt(var + eps)
+    // std = sqrt(variance + eps)
     ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, GPT2Config::layer_norm_eps));
     ggml_tensor* std = ggml_sqrt(ctx, var_eps);
-    fprintf(stderr, "DEBUG LayerNorm: x_centered ne[0]=%ld ne[1]=%ld std ne[0]=%ld\n",
-            x_centered->ne[0], x_centered->ne[1], std->ne[0]);
 
-    // Normalize and scale/shift
+    // Normalize: (x - mean) / std
     ggml_tensor* x_norm = ggml_div(ctx, x_centered, std);
-    fprintf(stderr, "DEBUG LayerNorm: x_norm ne[0]=%ld ne[1]=%ld gamma ne[0]=%ld\n",
-            x_norm->ne[0], x_norm->ne[1], gamma->ne[0]);
 
-    // Multiply by gamma and add beta - use 1D tensors directly
-    // GGML's element-wise ops should handle the broadcasting
-    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
-    ggml_tensor* result = ggml_add(ctx, scaled, beta);
+    // x_norm is 1D, make contiguous then reshape to 2D
+    ggml_tensor* x_norm_cont = ggml_cont(ctx, x_norm);
+    ggml_tensor* x_norm_2d = ggml_reshape_2d(ctx, x_norm_cont, n_rows, n_cols);
+
+    // gamma and beta are (n_cols,), reshape to (1, n_cols) for broadcasting
+    ggml_tensor* gamma_cont = ggml_cont(ctx, gamma);
+    ggml_tensor* gamma_2d = ggml_reshape_2d(ctx, gamma_cont, 1, n_cols);
+    ggml_tensor* beta_cont = ggml_cont(ctx, beta);
+    ggml_tensor* beta_2d = ggml_reshape_2d(ctx, beta_cont, 1, n_cols);
+
+    // Scale and shift: (n_rows, n_cols) * (1, n_cols) + (1, n_cols)
+    ggml_tensor* scaled = ggml_mul(ctx, x_norm_2d, gamma_2d);
+    ggml_tensor* result = ggml_add(ctx, scaled, beta_2d);
+
     return result;
 }
 
