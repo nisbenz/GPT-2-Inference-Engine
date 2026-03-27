@@ -4,12 +4,12 @@
 #include <vector>
 #include <string>
 
-// GPT-2 Large Configuration: 36 layers, 1280 hidden, 20 heads, 5120 FFN intermediate
+// GPT-2 Configuration: 12 layers, 768 hidden, 12 heads, 3072 FFN intermediate
 struct GPT2Config {
-    static constexpr int n_layers = 36;
-    static constexpr int n_heads = 20;
-    static constexpr int n_embd = 1280;       // Hidden size
-    static constexpr int n_ffn = 5120;        // FFN intermediate size
+    static constexpr int n_layers = 12;
+    static constexpr int n_heads = 12;
+    static constexpr int n_embd = 768;       // Hidden size
+    static constexpr int n_ffn = 3072;       // FFN intermediate size
     static constexpr int vocab_size = 50257;
     static constexpr int context_length = 1024;
     static constexpr int head_dim = n_embd / n_heads;  // 64

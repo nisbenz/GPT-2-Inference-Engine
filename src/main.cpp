@@ -45,8 +45,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Load weights (placeholder path - would be downloaded in Colab)
-    std::string weights_path = "gpt2-large.bin";
+    // Load weights (GGUF format - downloaded in Colab)
+    std::string weights_path = "/content/gpt2-model/gpt2.Q4_K_M.gguf";
     std::cout << "Loading weights from: " << weights_path << std::endl;
 
     // For now, we use random initialization since we don't have actual weights

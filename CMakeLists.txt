@@ -17,6 +17,22 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src
 )
 
+# Find GGML libraries (GGML builds libggml.so and libggml_cublas.so)
+set(GGML_BUILD_DIR "${GGML_DIR}/build")
+
+find_library(GGML_LIBRARY ggml PATHS ${GGML_BUILD_DIR}/lib NO_DEFAULT_PATH)
+find_library(GGML_CUBLAS_LIBRARY ggml_cublas PATHS ${GGML_BUILD_DIR}/lib NO_DEFAULT_PATH)
+
+if(NOT GGML_LIBRARY)
+    message(FATAL_ERROR "GGML library not found in ${GGML_BUILD_DIR}/lib")
+endif()
+if(NOT GGML_CUBLAS_LIBRARY)
+    message(FATAL_ERROR "GGML CUDA library not found in ${GGML_BUILD_DIR}/lib")
+endif()
+
+message(STATUS "Found GGML: ${GGML_LIBRARY}")
+message(STATUS "Found GGML_CUBLAS: ${GGML_CUBLAS_LIBRARY}")
+
 # Source files
 file(GLOB SOURCES
     src/*.cpp
@@ -25,11 +41,11 @@ file(GLOB SOURCES
 # Executable
 add_executable(gpt2 ${SOURCES})
 
-# Link GGML (use cmake exported targets from GGML build)
+# Link GGML libraries
 target_link_libraries(gpt2
-    ggml
-    ggml_cublas
-    cublas
+    ${GGML_LIBRARY}
+    ${GGML_CUBLAS_LIBRARY}
+    CUDA::cublas
     pthread
     m
 )

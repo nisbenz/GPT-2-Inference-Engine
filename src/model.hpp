@@ -8,7 +8,8 @@
 #include <vector>
 #include <memory>
 
-// GPT-2 Large (774M) Model
+// GPT-2 (124M) Model
+// Reference: https://huggingface.co/openai-community/gpt2
 class GPT2Model {
 public:
     GPT2Model();
@@ -17,7 +18,7 @@ public:
     // Initialize GGML context and allocate tensors
     bool init(bool use_gpu = true);
 
-    // Load weights from file (HuggingFace format or GGML format)
+    // Load weights from file (GGUF format)
     bool load_weights(const std::string& path);
 
     // Run inference on input token IDs
@@ -44,12 +45,12 @@ public:
     // Sample next token from logits
     int sample(const std::vector<float>& logits, float temperature, int top_k);
 
-    // Configuration
-    static constexpr int N_LAYERS = 36;
-    static constexpr int N_HEADS = 20;
-    static constexpr int N_EMBD = 1280;
-    static constexpr int N_FFN = 5120;
-    static constexpr int VOCAB_SIZE = 50257;
+    // Configuration (GPT-2 base: 124M parameters)
+    static constexpr int N_LAYERS = 12;       // 12 layers
+    static constexpr int N_HEADS = 12;        // 12 attention heads
+    static constexpr int N_EMBD = 768;        // 768 hidden size
+    static constexpr int N_FFN = 3072;        // 3072 FFN intermediate size
+    static constexpr int VOCAB_SIZE = 50257;  // GPT-2 vocabulary
     static constexpr int CONTEXT_LENGTH = 1024;
     static constexpr int HEAD_DIM = N_EMBD / N_HEADS;  // 64
     static constexpr int EOS_TOKEN = 50256;
