@@ -553,52 +553,30 @@ ggml_tensor* layer_norm(
     float eps
 ) {
     // LayerNorm: gamma * (x - mean) / sqrt(var + eps) + beta
-    // Since GGML lacks per-row reduction ops, compute mean/variance over full tensor
-    // For seq_len=1 (typical during generation), this equals per-row computation
-    // Note: ggml_nrows returns ne[1], but we need ne[0] for row count in 2D tensor
+    // x shape: (n_rows, n_cols) = (seq_len, n_embd)
+    // For seq_len=1, we can use per-token norm which is same as full tensor
+
     int n_rows = (int)x->ne[0];  // number of rows (tokens)
     int n_cols = (int)x->ne[1];  // number of columns (embedding dim)
 
-    printf("[layer_norm function] START: x ne[0]=%lu ne[1]=%lu, n_rows=%d n_cols=%d\n",
-           (unsigned long)x->ne[0], (unsigned long)x->ne[1], n_rows, n_cols);
-    printf("[layer_norm function] gamma ne[0]=%lu\n", (unsigned long)gamma->ne[0]);
-    fflush(stdout);
-
-    // Compute mean over all elements
-    printf("[layer_norm function] Before ggml_sum\n");
-    fflush(stdout);
+    // Compute mean over all elements: sum(x) / (n_rows * n_cols)
     ggml_tensor* x_sum = ggml_sum(ctx, x);
-    printf("[layer_norm function] x_sum ne[0]=%lu ne[1]=%lu ne[2]=%lu ne[3]=%lu\n",
-           (unsigned long)x_sum->ne[0], (unsigned long)x_sum->ne[1],
-           (unsigned long)x_sum->ne[2], (unsigned long)x_sum->ne[3]);
-    fflush(stdout);
     ggml_tensor* x_mean = ggml_scale(ctx, x_sum, 1.0f / (float)(n_rows * n_cols));
-    printf("[layer_norm function] x_mean ne[0]=%lu ne[1]=%lu\n",
-           (unsigned long)x_mean->ne[0], (unsigned long)x_mean->ne[1]);
-    fflush(stdout);
 
-    printf("[layer_norm function] Before ggml_repeat for x_mean\n");
-    fflush(stdout);
-    // Explicitly repeat x_mean to match x's shape for broadcast
-    ggml_tensor* x_mean_broadcast = ggml_repeat(ctx, x_mean, x);
-
-    // Compute x - mean
-    ggml_tensor* x_centered = ggml_sub(ctx, x, x_mean_broadcast);
-
-    // Compute variance: mean((x - mean)^2)
+    // Compute variance: sum((x - mean)^2) / (n_rows * n_cols)
+    ggml_tensor* x_centered = ggml_sub(ctx, x, x_mean);
     ggml_tensor* x_centered_sq = ggml_sqr(ctx, x_centered);
     ggml_tensor* var_sum = ggml_sum(ctx, x_centered_sq);
     ggml_tensor* variance = ggml_scale(ctx, var_sum, 1.0f / (float)(n_rows * n_cols));
 
-    // Explicitly repeat variance to match x's shape
-    ggml_tensor* variance_broadcast = ggml_repeat(ctx, variance, x);
-
-    // Compute sqrt(var + eps)
-    ggml_tensor* var_eps = ggml_add(ctx, variance_broadcast, ggml_new_scalar(ctx, eps));
+    // Compute std = sqrt(var + eps)
+    ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, eps));
     ggml_tensor* std = ggml_sqrt(ctx, var_eps);
 
-    // Normalize and scale/shift
+    // Normalize: (x - mean) / std
     ggml_tensor* x_norm = ggml_div(ctx, x_centered, std);
+
+    // Scale and shift: gamma * x_norm + beta
     ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
     ggml_tensor* result = ggml_add(ctx, scaled, beta);
     return result;
