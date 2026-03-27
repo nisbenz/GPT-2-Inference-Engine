@@ -31,16 +31,18 @@ ggml_tensor* LayerNorm::forward(ggml_context* ctx, ggml_tensor* x) {
     // Compute std = sqrt(var + eps)
     ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, GPT2Config::layer_norm_eps));
     ggml_tensor* std = ggml_sqrt(ctx, var_eps);
+    fprintf(stderr, "DEBUG LayerNorm: x_centered ne[0]=%ld ne[1]=%ld std ne[0]=%ld\n",
+            x_centered->ne[0], x_centered->ne[1], std->ne[0]);
 
     // Normalize and scale/shift
     ggml_tensor* x_norm = ggml_div(ctx, x_centered, std);
+    fprintf(stderr, "DEBUG LayerNorm: x_norm ne[0]=%ld ne[1]=%ld gamma ne[0]=%ld\n",
+            x_norm->ne[0], x_norm->ne[1], gamma->ne[0]);
 
-    // gamma and beta are 1D (n_cols,), need to reshape to 2D (1, n_cols) for broadcasting
-    ggml_tensor* gamma_2d = ggml_reshape_2d(ctx, gamma, 1, n_cols);
-    ggml_tensor* beta_2d = ggml_reshape_2d(ctx, beta, 1, n_cols);
-
-    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma_2d);
-    ggml_tensor* result = ggml_add(ctx, scaled, beta_2d);
+    // Multiply by gamma and add beta - use 1D tensors directly
+    // GGML's element-wise ops should handle the broadcasting
+    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
+    ggml_tensor* result = ggml_add(ctx, scaled, beta);
     return result;
 }
 
