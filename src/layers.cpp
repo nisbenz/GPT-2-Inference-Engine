@@ -261,24 +261,52 @@ ggml_tensor* Attention::forward(
     // For seq_len tokens starting at position, we need a mask that allows each token to attend
     // to positions up to (position + i)
     if (seq_len > 1 || (use_cache && position > 0)) {
-        // Create mask with dimensions matching scores: (seq_len * n_heads, n_heads * total_kv_len)
-        ggml_tensor* mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
-                                               seq_len * n_heads, n_heads * total_kv_len);
-        float* mask_data = (float*)mask->data;
+        // Create mask as 3D tensor (n_heads, seq_len, total_kv_len) for cleaner broadcasting
+        // Then reshape to (seq_len * n_heads, total_kv_len) - will broadcast across n_heads in scores
+        ggml_tensor* mask_3d = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, seq_len, total_kv_len, n_heads);
+        float* mask_data = (float*)mask_3d->data;
 
+        // mask_3d is stored as (seq_len, total_kv_len, n_heads) in memory
+        // For head h, token i, key position j: mask[j, i, h] (GGML's column-major)
         for (int h = 0; h < n_heads; h++) {
             for (int i = 0; i < seq_len; i++) {
                 int token_pos = position + i;  // absolute position of token i
-                int row_offset = (h * seq_len + i) * n_heads * total_kv_len;
-                int col_offset = h * total_kv_len;
+                int plane_size = seq_len * n_heads;
                 for (int j = 0; j < total_kv_len; j++) {
-                    int kv_pos = j;  // position in the cached/new concatenated k
-                    mask_data[row_offset + col_offset + j] =
-                        (kv_pos > token_pos) ? -10000.0f : 0.0f;
+                    // GGML column-major: index = j*plane_size + i*n_heads + h
+                    size_t idx = j * plane_size + i * n_heads + h;
+                    mask_data[idx] = (j > token_pos) ? -10000.0f : 0.0f;
                 }
             }
         }
 
+        // Reshape mask to (seq_len, n_heads, total_kv_len) then broadcast to scores shape
+        ggml_tensor* mask_reshaped = ggml_reshape_3d(ctx, mask_3d, seq_len, n_heads, total_kv_len);
+        // scores is (seq_len * n_heads, n_heads * total_kv_len)
+        // We need mask to be broadcastable - reshape to (seq_len, n_heads, total_kv_len)
+        // which broadcasts to (seq_len, n_heads, total_kv_len) repeated across n_heads
+        // Actually scores is flat 2D, so let's use 2D mask directly
+
+        // scores row structure: row r = h*seq_len + i represents head h, token i
+        // scores col structure: col c = h*total_kv_len + j represents head h, key position j
+        // For row (h,i), we need mask values where j > position+i is -10000
+        ggml_tensor* mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
+                                               seq_len * n_heads, n_heads * total_kv_len);
+        float* mask2d = (float*)mask->data;
+
+        for (int r = 0; r < seq_len * n_heads; r++) {
+            int h = r / seq_len;  // head index
+            int i = r % seq_len;  // token within sequence
+            int token_pos = position + i;
+            int col_base = h * total_kv_len;
+            for (int j = 0; j < total_kv_len; j++) {
+                int c = col_base + j;
+                size_t idx = r * (n_heads * total_kv_len) + c;
+                mask2d[idx] = (j > token_pos) ? -10000.0f : 0.0f;
+            }
+        }
+
+        printf("[Debug Attn] mask shape: ne[0]=%lu, ne[1]=%lu\n", (unsigned long)mask->ne[0], (unsigned long)mask->ne[1]);
         scores = ggml_add(ctx, scores, mask);
     }
 
