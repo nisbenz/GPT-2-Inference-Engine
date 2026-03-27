@@ -23,8 +23,7 @@ ggml_tensor* LayerNorm::forward(ggml_context* ctx, ggml_tensor* x) {
 
     // Compute mean over all elements: sum(x) / (seq_len * n_embd)
     ggml_tensor* x_sum = ggml_sum(ctx, x);
-    ggml_tensor* x_mean = ggml_scale(ctx, x_sum,
-        ggml_new_scalar(ctx, 1.0f / (float)(seq_len * n_embd)));
+    ggml_tensor* x_mean = ggml_scale(ctx, x_sum, 1.0f / (float)(seq_len * n_embd));
 
     // Compute x - mean
     ggml_tensor* x_centered = ggml_sub(ctx, x, x_mean);
@@ -32,8 +31,7 @@ ggml_tensor* LayerNorm::forward(ggml_context* ctx, ggml_tensor* x) {
     // Compute variance: mean((x - mean)^2)
     ggml_tensor* x_centered_sq = ggml_sqr(ctx, x_centered);
     ggml_tensor* var_sum = ggml_sum(ctx, x_centered_sq);
-    ggml_tensor* variance = ggml_scale(ctx, var_sum,
-        ggml_new_scalar(ctx, 1.0f / (float)(seq_len * n_embd)));
+    ggml_tensor* variance = ggml_scale(ctx, var_sum, 1.0f / (float)(seq_len * n_embd));
 
     // Compute sqrt(var + eps)
     ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, GPT2Config::layer_norm_eps));
@@ -208,8 +206,9 @@ ggml_tensor* Attention::forward(
 
             ggml_tensor* v_cached = ggml_view_3d(ctx, v_cache,
                 n_heads, position, head_dim,
-                head_dim * sizeof(float),
-                0);
+                head_dim * context_length * sizeof(float),
+                context_length * sizeof(float),
+                sizeof(float));
 
             v_cached = ggml_reshape_3d(ctx, v_cached, n_heads, position, head_dim);
             v_cached = ggml_transpose(ctx, v_cached);
@@ -435,8 +434,7 @@ ggml_tensor* layer_norm(
 
     // Compute mean over all elements
     ggml_tensor* x_sum = ggml_sum(ctx, x);
-    ggml_tensor* x_mean = ggml_scale(ctx, x_sum,
-        ggml_new_scalar(ctx, 1.0f / (float)(seq_len * n_embd)));
+    ggml_tensor* x_mean = ggml_scale(ctx, x_sum, 1.0f / (float)(seq_len * n_embd));
 
     // Compute x - mean
     ggml_tensor* x_centered = ggml_sub(ctx, x, x_mean);
@@ -444,8 +442,7 @@ ggml_tensor* layer_norm(
     // Compute variance: mean((x - mean)^2)
     ggml_tensor* x_centered_sq = ggml_sqr(ctx, x_centered);
     ggml_tensor* var_sum = ggml_sum(ctx, x_centered_sq);
-    ggml_tensor* variance = ggml_scale(ctx, var_sum,
-        ggml_new_scalar(ctx, 1.0f / (float)(seq_len * n_embd)));
+    ggml_tensor* variance = ggml_scale(ctx, var_sum, 1.0f / (float)(seq_len * n_embd));
 
     // Compute sqrt(var + eps)
     ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, eps));
