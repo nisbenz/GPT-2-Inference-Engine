@@ -168,9 +168,9 @@ ggml_tensor* Attention::forward(
     ggml_tensor* w_reshaped = ggml_reshape_2d(ctx, c_attn_weight, c_attn_weight->ne[0], c_attn_weight->ne[1]); // (n_embd, 3*n_embd)
 
     ggml_tensor* qkv = ggml_mul_mat(ctx, x_reshaped, w_reshaped);
-    fprintf(stderr, "DEBUG ATTN: qkv (%ld, %ld) + c_attn_bias (%ld, %ld)\n",
-            qkv->ne[0], qkv->ne[1], c_attn_bias->ne[0], c_attn_bias->ne[1]);
-    qkv = ggml_add(ctx, qkv, c_attn_bias);
+    // c_attn_bias is (3*n_embd,), reshape to (1, 3*n_embd) for broadcasting over rows
+    ggml_tensor* bias_2d = ggml_reshape_2d(ctx, c_attn_bias, 1, c_attn_bias->ne[0]);
+    qkv = ggml_add(ctx, qkv, bias_2d);
 
     // Split into q, k, v - each (n_embd, seq_len) in row-major
     // qkv is (3*n_embd, seq_len), we split by rows
@@ -247,8 +247,6 @@ ggml_tensor* Attention::forward(
                 mask_data[idx] = (j > token_pos) ? -10000.0f : 0.0f;
             }
         }
-        fprintf(stderr, "DEBUG ATTN: scores_h (%ld, %ld) + mask_h (%ld, %ld)\n",
-                scores_h->ne[0], scores_h->ne[1], mask_h->ne[0], mask_h->ne[1]);
         scores_h = ggml_add(ctx, scores_h, mask_h);
 
         // Softmax
@@ -279,9 +277,9 @@ ggml_tensor* Attention::forward(
     ggml_tensor* proj_reshaped = ggml_reshape_2d(ctx, c_proj_weight, c_proj_weight->ne[0], c_proj_weight->ne[1]); // (n_embd, n_embd)
 
     ggml_tensor* out = ggml_mul_mat(ctx, attn_out_reshaped, proj_reshaped);
-    fprintf(stderr, "DEBUG ATTN: out (%ld, %ld) + c_proj_bias (%ld, %ld)\n",
-            out->ne[0], out->ne[1], c_proj_bias->ne[0], c_proj_bias->ne[1]);
-    out = ggml_add(ctx, out, c_proj_bias);
+    // c_proj_bias is (n_embd,), reshape to (1, n_embd) for broadcasting
+    ggml_tensor* proj_bias_2d = ggml_reshape_2d(ctx, c_proj_bias, 1, c_proj_bias->ne[0]);
+    out = ggml_add(ctx, out, proj_bias_2d);
 
     ggml_build_forward_expand(gf, out);
     return out;
@@ -329,9 +327,9 @@ ggml_tensor* FFN::forward(ggml_context* ctx, ggml_cgraph* gf, ggml_tensor* x) {
 
     ggml_tensor* up_reshaped = ggml_reshape_2d(ctx, c_fc_weight, c_fc_weight->ne[0], c_fc_weight->ne[1]); // (n_embd, n_ffn)
     ggml_tensor* up = ggml_mul_mat(ctx, x_reshaped, up_reshaped);
-    fprintf(stderr, "DEBUG FFN: up (%ld, %ld) + c_fc_bias (%ld, %ld)\n",
-            up->ne[0], up->ne[1], c_fc_bias->ne[0], c_fc_bias->ne[1]);
-    up = ggml_add(ctx, up, c_fc_bias);
+    // c_fc_bias is (n_ffn,), reshape to (1, n_ffn) for broadcasting
+    ggml_tensor* fc_bias_2d = ggml_reshape_2d(ctx, c_fc_bias, 1, c_fc_bias->ne[0]);
+    up = ggml_add(ctx, up, fc_bias_2d);
     // up: (seq_len, n_ffn)
 
     // GELU activation
@@ -345,9 +343,9 @@ ggml_tensor* FFN::forward(ggml_context* ctx, ggml_cgraph* gf, ggml_tensor* x) {
 
     ggml_tensor* down_reshaped = ggml_reshape_2d(ctx, c_proj_weight, c_proj_weight->ne[0], c_proj_weight->ne[1]); // (n_ffn, n_embd)
     ggml_tensor* down = ggml_mul_mat(ctx, activated_reshaped, down_reshaped);
-    fprintf(stderr, "DEBUG FFN: down (%ld, %ld) + c_proj_bias (%ld, %ld)\n",
-            down->ne[0], down->ne[1], c_proj_bias->ne[0], c_proj_bias->ne[1]);
-    down = ggml_add(ctx, down, c_proj_bias);
+    // c_proj_bias is (n_embd,), reshape to (1, n_embd) for broadcasting
+    ggml_tensor* proj_bias_2d = ggml_reshape_2d(ctx, c_proj_bias, 1, c_proj_bias->ne[0]);
+    down = ggml_add(ctx, down, proj_bias_2d);
     // down: (seq_len, n_embd)
 
     return down;
@@ -374,15 +372,11 @@ ggml_tensor* TransformerBlock::forward(
     // Pre-norm architecture: LN1 -> Attention -> Residual
     ggml_tensor* ln1_out = layer_norm(ctx, x, ln1.gamma, ln1.beta, GPT2Config::layer_norm_eps);
     ggml_tensor* attn_out = attention.forward(ctx, gf, ln1_out, position, use_cache);
-    fprintf(stderr, "DEBUG BLOCK: h1 = x (%ld, %ld) + attn_out (%ld, %ld)\n",
-            x->ne[0], x->ne[1], attn_out->ne[0], attn_out->ne[1]);
     ggml_tensor* h1 = ggml_add(ctx, x, attn_out);
 
     // LN2 -> FFN -> Residual
     ggml_tensor* ln2_out = layer_norm(ctx, h1, ln2.gamma, ln2.beta, GPT2Config::layer_norm_eps);
     ggml_tensor* ffn_out = ffn.forward(ctx, gf, ln2_out);
-    fprintf(stderr, "DEBUG BLOCK: h2 = h1 (%ld, %ld) + ffn_out (%ld, %ld)\n",
-            h1->ne[0], h1->ne[1], ffn_out->ne[0], ffn_out->ne[1]);
     ggml_tensor* h2 = ggml_add(ctx, h1, ffn_out);
 
     return h2;
