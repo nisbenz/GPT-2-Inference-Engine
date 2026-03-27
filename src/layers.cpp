@@ -138,11 +138,24 @@ ggml_tensor* Attention::forward(
     int seq_len = (int)ggml_nrows(x);
 
     // QKV projection: (seq_len, n_embd) @ (n_embd, 3*n_embd) = (seq_len, 3*n_embd)
-    printf("[Attention] calling ggml_mul_mat qkv: x=%lux%lu, c_attn_weight=%lux%lu\n",
-           (unsigned long)x->ne[0], (unsigned long)x->ne[1],
-           (unsigned long)c_attn_weight->ne[0], (unsigned long)c_attn_weight->ne[1]);
+    printf("[Attention] x: %lux%lu type=%d\n", (unsigned long)x->ne[0], (unsigned long)x->ne[1], x->type);
+    printf("[Attention] c_attn_weight: %lux%lu type=%d\n", (unsigned long)c_attn_weight->ne[0], (unsigned long)c_attn_weight->ne[1], c_attn_weight->type);
+    printf("[Attention] GGML_TYPE_F32=%d\n", GGML_TYPE_F32);
     fflush(stdout);
-    ggml_tensor* qkv = ggml_mul_mat(ctx, x, c_attn_weight);
+
+    // Ensure tensors are contiguous and properly shaped
+    ggml_tensor* x_cont = ggml_contiguous(ctx, x);
+    // Force reshape to ensure proper shape interpretation
+    ggml_tensor* x_reshaped = ggml_reshape_2d(ctx, x_cont, x_cont->ne[0], x_cont->ne[1]);
+
+    ggml_tensor* w_cont = ggml_contiguous(ctx, c_attn_weight);
+    ggml_tensor* w_reshaped = ggml_reshape_2d(ctx, w_cont, w_cont->ne[0], w_cont->ne[1]);
+
+    printf("[Attention] x_reshaped: %lux%lu type=%d\n", (unsigned long)x_reshaped->ne[0], (unsigned long)x_reshaped->ne[1], x_reshaped->type);
+    printf("[Attention] w_reshaped: %lux%lu type=%d\n", (unsigned long)w_reshaped->ne[0], (unsigned long)w_reshaped->ne[1], w_reshaped->type);
+    fflush(stdout);
+
+    ggml_tensor* qkv = ggml_mul_mat(ctx, x_reshaped, w_reshaped);
     printf("[Attention] ggml_mul_mat qkv succeeded\n");
     fflush(stdout);
     qkv = ggml_add(ctx, qkv, c_attn_bias);
