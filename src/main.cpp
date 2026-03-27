@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
     }
 
     // Load weights (GGUF format - downloaded in Colab)
-    std::string weights_path = "/content/gpt2-model/gpt2.Q4_K_M.gguf";
+    std::string weights_path = "/content/gpt2-model/gpt2-bf16.gguf";
     std::cout << "Loading weights from: " << weights_path << std::endl;
 
     if (!model.load_weights(weights_path)) {
