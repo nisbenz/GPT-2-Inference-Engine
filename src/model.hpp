@@ -4,6 +4,7 @@
 #include "kv_cache.hpp"
 #include "tokenizer.hpp"
 #include <ggml.h>
+#include <ggml-impl.h>
 #include <string>
 #include <vector>
 #include <memory>
@@ -99,6 +100,8 @@ private:
     // Actually compute the graph
     void compute();
 
+    // Load weights from GGUF format
+    bool load_gguf_weights(const std::string& path);
     // Load weights from HuggingFace safetensors or pytorch bin
     bool load_huggingface_weights(const std::string& path);
     bool load_ggml_weights(const std::string& path);

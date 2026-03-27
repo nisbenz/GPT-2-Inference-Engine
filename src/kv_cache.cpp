@@ -1,6 +1,10 @@
 #include "kv_cache.hpp"
+#include "layers.hpp"
 #include <cstring>
 #include <iostream>
+
+// Use CONTEXT_LENGTH from model.hpp as MAX_SEQ_LEN
+static constexpr int MAX_SEQ_LEN = 1024;
 
 // ============== KVCacheEntry ==============
 
@@ -24,8 +28,8 @@ void KVCacheEntry::update(int position, const float* k_data, const float* v_data
     // k is stored as (head_dim, n_heads, seq_len)
     // We need to copy k_data (head_dim * n_heads) to position
 
-    int n_heads = 20;  // GPT-2 Large
-    int head_dim = 64;
+    int n_heads = GPT2Config::n_heads;
+    int head_dim = GPT2Config::head_dim;
 
     float* k_dst = (float*)k->data + position * n_heads * head_dim;
     memcpy(k_dst, k_data, n_heads * head_dim * sizeof(float));
@@ -39,8 +43,8 @@ void KVCacheEntry::update(int position, const float* k_data, const float* v_data
 }
 
 void KVCacheEntry::get(int position, float* k_out, float* v_out) {
-    int n_heads = 20;
-    int head_dim = 64;
+    int n_heads = GPT2Config::n_heads;
+    int head_dim = GPT2Config::head_dim;
 
     // Get all keys up to and including position
     float* k_src = (float*)k->data;
@@ -92,8 +96,8 @@ void copy_tensor_slice(
     // Assumes dst and src have same shape except possibly seq_len dimension
     // Copies n_tokens from src to dst at dst_offset
 
-    int n_heads = 20;
-    int head_dim = 64;
+    int n_heads = GPT2Config::n_heads;
+    int head_dim = GPT2Config::head_dim;
 
     size_t src_row_size = n_heads * head_dim * sizeof(float);
     size_t dst_row_size = ggml_nbytes(dst) / (MAX_SEQ_LEN);

@@ -2,6 +2,13 @@
 #include <cmath>
 #include <iostream>
 
+// Helper to create a scalar tensor (for adding constants)
+static inline ggml_tensor* ggml_new_scalar(ggml_context* ctx, float value) {
+    ggml_tensor* t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    ((float*)t->data)[0] = value;
+    return t;
+}
+
 // ============== LayerNorm ==============
 
 ggml_tensor* LayerNorm::forward(ggml_context* ctx, ggml_tensor* x) {
@@ -11,7 +18,7 @@ ggml_tensor* LayerNorm::forward(ggml_context* ctx, ggml_tensor* x) {
     ggml_tensor* x_centered = ggml_sub(ctx, x, mean);
 
     ggml_tensor* variance = ggml_sqr(ctx, x_centered);
-    ggml_tensor* var_eps = ggml_add_float(ctx, variance, layer_norm_eps);
+    ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, GPT2Config::layer_norm_eps));
     ggml_tensor* std = ggml_sqrt(ctx, var_eps);
 
     ggml_tensor* normalized = ggml_div(ctx, x_centered, std);
@@ -27,7 +34,7 @@ ggml_tensor* RMSNorm::forward(ggml_context* ctx, ggml_tensor* x) {
     // RMSNorm: x / sqrt(mean(x^2) + eps) * weight
     ggml_tensor* x2 = ggml_sqr(ctx, x);
     ggml_tensor* mean2 = ggml_mean(ctx, x2);
-    ggml_tensor* var_eps = ggml_add_float(ctx, mean2, layer_norm_eps);
+    ggml_tensor* var_eps = ggml_add(ctx, mean2, ggml_new_scalar(ctx, GPT2Config::layer_norm_eps));
     ggml_tensor* rms = ggml_sqrt(ctx, var_eps);
     ggml_tensor* normalized = ggml_div(ctx, x, rms);
     ggml_tensor* result = ggml_mul(ctx, normalized, weight);
@@ -39,10 +46,10 @@ ggml_tensor* RMSNorm::forward(ggml_context* ctx, ggml_tensor* x) {
 ggml_tensor* GELU::forward(ggml_context* ctx, ggml_tensor* x) {
     // GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     ggml_tensor* x3 = ggml_mul(ctx, ggml_mul(ctx, x, x), x);  // x^3
-    ggml_tensor* inner = ggml_add(ctx, x, ggml_scale(ctx, x3, GELU_A));  // x + 0.044715 * x^3
-    ggml_tensor* tanh_arg = ggml_scale(ctx, inner, GELU_SQRT2_OVER_PI);  // sqrt(2/pi) * inner
+    ggml_tensor* inner = ggml_add(ctx, x, ggml_scale(ctx, x3, GELU::GELU_A));  // x + 0.044715 * x^3
+    ggml_tensor* tanh_arg = ggml_scale(ctx, inner, GELU::GELU_SQRT2_OVER_PI);  // sqrt(2/pi) * inner
     ggml_tensor* tanh_result = ggml_tanh(ctx, tanh_arg);
-    ggml_tensor* one_plus_tanh = ggml_add_float(ctx, tanh_result, 1.0f);
+    ggml_tensor* one_plus_tanh = ggml_add(ctx, tanh_result, ggml_new_scalar(ctx, 1.0f));
     ggml_tensor* result = ggml_scale(ctx, ggml_mul(ctx, x, one_plus_tanh), 0.5f);
     return result;
 }
@@ -103,7 +110,8 @@ ggml_tensor* Attention::forward(
 
     // QKV projection: compute q, k, v from input
     // c_attn_weight: (n_embd, 3 * n_embd), c_attn_bias: (3 * n_embd)
-    ggml_tensor* qkv = ggml_linear(ctx, x, c_attn_weight, c_attn_bias);
+    ggml_tensor* qkv = ggml_mul_mat(ctx, x, c_attn_weight);
+    qkv = ggml_add(ctx, qkv, c_attn_bias);
     // qkv: (seq_len, 3 * n_embd)
 
     // Split into q, k, v
@@ -136,14 +144,14 @@ ggml_tensor* Attention::forward(
     // q: (1, n_heads, head_dim), k: (n_heads, head_dim, seq_len)
     // scores: (1, n_heads, seq_len)
     ggml_tensor* scores = ggml_mul_mat(ctx, q, k);
-    ggml_tensor* scaled_scores = ggml_scale_float(ctx, scores, 1.0f / std::sqrt(head_dim));
+    ggml_tensor* scaled_scores = ggml_scale(ctx, scores, 1.0f / std::sqrt((float)head_dim));
 
     // Apply causal mask
     ggml_tensor* mask = causal_mask(ctx, 1);  // seq_len = 1 for single token
     ggml_tensor* masked_scores = ggml_add(ctx, scaled_scores, mask);
 
     // Softmax
-    ggml_tensor* attn_weights = ggml_softmax(ctx, masked_scores);
+    ggml_tensor* attn_weights = ggml_soft_max(ctx, masked_scores);
 
     // Apply attention to v: attn_weights @ v
     // attn_weights: (1, n_heads, seq_len), v: (n_heads, seq_len, head_dim)
@@ -156,7 +164,8 @@ ggml_tensor* Attention::forward(
     // attn_out: (1, n_embd)
 
     // Output projection
-    ggml_tensor* out = ggml_linear(ctx, attn_out, c_proj_weight, c_proj_bias);
+    ggml_tensor* out = ggml_mul_mat(ctx, attn_out, c_proj_weight);
+    out = ggml_add(ctx, out, c_proj_bias);
     // out: (1, n_embd)
 
     return out;
@@ -182,10 +191,10 @@ FFN::FFN()
 ggml_tensor* FFN::gelu(ggml_context* ctx, ggml_tensor* x) {
     // GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     ggml_tensor* x3 = ggml_mul(ctx, ggml_mul(ctx, x, x), x);
-    ggml_tensor* inner = ggml_add(ctx, x, ggml_scale(ctx, x3, GELU_A));
-    ggml_tensor* tanh_arg = ggml_scale(ctx, inner, GELU_SQRT2_OVER_PI);
+    ggml_tensor* inner = ggml_add(ctx, x, ggml_scale(ctx, x3, GELU::GELU_A));
+    ggml_tensor* tanh_arg = ggml_scale(ctx, inner, GELU::GELU_SQRT2_OVER_PI);
     ggml_tensor* tanh_result = ggml_tanh(ctx, tanh_arg);
-    ggml_tensor* one_plus_tanh = ggml_add_float(ctx, tanh_result, 1.0f);
+    ggml_tensor* one_plus_tanh = ggml_add(ctx, tanh_result, ggml_new_scalar(ctx, 1.0f));
     ggml_tensor* result = ggml_scale(ctx, ggml_mul(ctx, x, one_plus_tanh), 0.5f);
     return result;
 }
@@ -194,7 +203,8 @@ ggml_tensor* FFN::forward(ggml_context* ctx, ggml_cgraph* gf, ggml_tensor* x) {
     // FFN: GELU(up_proj(x)) * down_proj(x)
 
     // up_proj: (n_embd, n_ffn)
-    ggml_tensor* up = ggml_linear(ctx, x, c_fc_weight, c_fc_bias);
+    ggml_tensor* up = ggml_mul_mat(ctx, x, c_fc_weight);
+    up = ggml_add(ctx, up, c_fc_bias);
     // up: (seq_len, n_ffn)
 
     // GELU activation
@@ -202,7 +212,8 @@ ggml_tensor* FFN::forward(ggml_context* ctx, ggml_cgraph* gf, ggml_tensor* x) {
     // activated: (seq_len, n_ffn)
 
     // down_proj: (n_ffn, n_embd)
-    ggml_tensor* down = ggml_linear(ctx, activated, c_proj_weight, c_proj_bias);
+    ggml_tensor* down = ggml_mul_mat(ctx, activated, c_proj_weight);
+    down = ggml_add(ctx, down, c_proj_bias);
     // down: (seq_len, n_embd)
 
     return down;
@@ -291,7 +302,7 @@ ggml_tensor* layer_norm(
     ggml_tensor* mean = ggml_mean(ctx, x);
     ggml_tensor* x_centered = ggml_sub(ctx, x, mean);
     ggml_tensor* variance = ggml_sqr(ctx, x_centered);
-    ggml_tensor* var_eps = ggml_add_float(ctx, variance, eps);
+    ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, eps));
     ggml_tensor* std = ggml_sqrt(ctx, var_eps);
     ggml_tensor* normalized = ggml_div(ctx, x_centered, std);
     ggml_tensor* scaled = ggml_mul(ctx, normalized, gamma);
@@ -307,7 +318,7 @@ ggml_tensor* rms_norm(
 ) {
     ggml_tensor* x2 = ggml_sqr(ctx, x);
     ggml_tensor* mean2 = ggml_mean(ctx, x2);
-    ggml_tensor* var_eps = ggml_add_float(ctx, mean2, eps);
+    ggml_tensor* var_eps = ggml_add(ctx, mean2, ggml_new_scalar(ctx, eps));
     ggml_tensor* rms = ggml_sqrt(ctx, var_eps);
     ggml_tensor* normalized = ggml_div(ctx, x, rms);
     ggml_tensor* result = ggml_mul(ctx, normalized, weight);

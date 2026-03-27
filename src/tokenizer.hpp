@@ -5,6 +5,13 @@
 #include <unordered_map>
 #include <regex>
 
+// Custom hash for pair<int,int> since std::hash doesn't specialize for pairs
+struct pair_hash {
+    size_t operator()(const std::pair<int, int>& p) const noexcept {
+        return (static_cast<size_t>(p.first) << 32) ^ static_cast<size_t>(p.second);
+    }
+};
+
 // GPT-2 Byte-Level BPE Tokenizer
 // Pipeline: Raw String → Regex Chunks → UTF-8 Bytes → BPE Merges → Integer IDs
 
@@ -38,7 +45,7 @@ private:
 
     // Byte pair encoding data
     std::unordered_map<int, int> byte_to_id_;       // byte -> token id
-    std::unordered_map<std::pair<int, int>, int> merges_;  // (b1, b2) -> new_id
+    std::unordered_map<std::pair<int, int>, int, pair_hash> merges_;  // (b1, b2) -> new_id
     std::vector<std::pair<int, int>> merge_order_;  // Ordered list of merges
 
     // Regex for GPT-2 tokenization
