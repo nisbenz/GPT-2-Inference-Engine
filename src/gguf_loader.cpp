@@ -1,5 +1,6 @@
 #include "gguf_loader.h"
 #include <algorithm>
+#include <cstring>
 
 static inline void read_bytes(FILE* fp, void* dst, size_t n) {
     if (fread(dst, 1, n, fp) != n) throw std::runtime_error("GGUF: unexpected end of file");
