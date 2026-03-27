@@ -301,7 +301,7 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
             // Build a lookup map based on tensor name patterns
             if (t.name == "model.wte" || t.name == "model.embed_tokens" || t.name == "token_embd.weight") {
                 dst = wte_;
-            } else if (t.name == "model.wpe" || t.name == "model.position_embeddings" || t.name == "pos_embd.weight") {
+            } else if (t.name == "model.wpe" || t.name == "model.position_embeddings" || t.name == "pos_embd.weight" || t.name == "position_embd.weight") {
                 dst = wpe_;
             } else if (t.name == "model.ln_f.weight" || t.name == "model.final_layernorm.weight" || t.name == "model.ln_f.g" || t.name == "output_norm.weight") {
                 dst = ln_f_.gamma;

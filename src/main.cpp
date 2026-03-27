@@ -72,9 +72,11 @@ int main(int argc, char** argv) {
 
     std::vector<int> generated_tokens = model.generate(prompt_tokens, max_tokens, temperature, top_k);
 
-    // Decode and print output
-    std::string output = model.decode(generated_tokens);
-    std::cout << output << std::endl;
+    // Decode and print only the newly generated tokens (skip prompt)
+    std::vector<int> new_tokens(generated_tokens.begin() + prompt_tokens.size(), generated_tokens.end());
+    std::string output = model.decode(new_tokens);
+    std::cout << std::endl << "Prompt: " << prompt << std::endl;
+    std::cout << "Generated: " << output << std::endl;
 
     std::cout << std::endl << "Done!" << std::endl;
 
