@@ -239,10 +239,16 @@ ggml_tensor* Attention::forward(
 
     // Reshape k for matmul: (total_kv_len, n_heads, head_dim) -> (n_heads, total_kv_len, head_dim)
     k = ggml_reshape_3d(ctx, k, n_heads, total_kv_len, head_dim);
+    printf("[Debug Attn] k after reshape_3d: ne[0]=%lu, ne[1]=%lu, ne[2]=%lu, n_dims=%d\n",
+           (unsigned long)k->ne[0], (unsigned long)k->ne[1], (unsigned long)k->ne[2], k->n_dims);
     // Transpose to (n_heads, head_dim, total_kv_len)
     k = ggml_transpose(ctx, k);
+    printf("[Debug Attn] k after transpose: ne[0]=%lu, ne[1]=%lu, ne[2]=%lu, n_dims=%d\n",
+           (unsigned long)k->ne[0], (unsigned long)k->ne[1], (unsigned long)k->ne[2], k->n_dims);
     // Reshape to (head_dim, n_heads * total_kv_len)
     ggml_tensor* k_mat = ggml_reshape_2d(ctx, k, head_dim, n_heads * total_kv_len);
+    printf("[Debug Attn] k_mat: ne[0]=%lu, ne[1]=%lu, n_dims=%d\n",
+           (unsigned long)k_mat->ne[0], (unsigned long)k_mat->ne[1], k_mat->n_dims);
 
     // Similar for v: (total_kv_len, n_heads, head_dim) -> (n_heads * total_kv_len, head_dim)
     v = ggml_reshape_3d(ctx, v, n_heads, total_kv_len, head_dim);
