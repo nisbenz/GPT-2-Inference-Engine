@@ -558,10 +558,21 @@ ggml_tensor* layer_norm(
     int seq_len = (int)ggml_nrows(x);
     int n_embd = GPT2Config::n_embd;
 
+    printf("[layer_norm function] START: x ne[0]=%lu ne[1]=%lu, seq_len=%d n_embd=%d\n",
+           (unsigned long)x->ne[0], (unsigned long)x->ne[1], seq_len, n_embd);
+    printf("[layer_norm function] gamma ne[0]=%lu\n", (unsigned long)gamma->ne[0]);
+    fflush(stdout);
+
     // Compute mean over all elements
+    printf("[layer_norm function] Before ggml_sum\n");
+    fflush(stdout);
     ggml_tensor* x_sum = ggml_sum(ctx, x);
+    printf("[layer_norm function] After ggml_sum\n");
+    fflush(stdout);
     ggml_tensor* x_mean = ggml_scale(ctx, x_sum, 1.0f / (float)(seq_len * n_embd));
 
+    printf("[layer_norm function] Before ggml_repeat for x_mean\n");
+    fflush(stdout);
     // Explicitly repeat x_mean to match x's shape for broadcast
     ggml_tensor* x_mean_broadcast = ggml_repeat(ctx, x_mean, x);
 
