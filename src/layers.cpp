@@ -14,84 +14,28 @@ static inline ggml_tensor* ggml_new_scalar(ggml_context* ctx, float value) {
 ggml_tensor* LayerNorm::forward(ggml_context* ctx, ggml_tensor* x) {
     // LayerNorm: gamma * (x - mean) / sqrt(var + eps) + beta
     // x shape: (n_rows, n_cols) = (seq_len, n_embd)
-    // Since GGML lacks per-row reduction ops, we use a simplified approach:
-    // compute mean/variance over the full tensor as approximation
-    // For seq_len=1 (typical during generation), this equals per-row computation
 
-    int n_rows = (int)x->ne[0];  // number of rows (tokens)
-    int n_cols = (int)x->ne[1];  // number of columns (embedding dim)
+    int n_rows = (int)x->ne[0];
+    int n_cols = (int)x->ne[1];
 
-    printf("[LayerNorm] START: x ne[0]=%lu ne[1]=%lu, n_rows=%d n_cols=%d\n",
-           (unsigned long)x->ne[0], (unsigned long)x->ne[1], n_rows, n_cols);
-    fflush(stdout);
-
-    // Compute mean over all elements: sum(x) / (n_rows * n_cols)
-    printf("[LayerNorm] Before ggml_sum\n");
-    fflush(stdout);
+    // Compute mean over all elements
     ggml_tensor* x_sum = ggml_sum(ctx, x);
-    printf("[LayerNorm] After ggml_sum: x_sum ne[0]=%lu\n", (unsigned long)x_sum->ne[0]);
-    fflush(stdout);
-
-    printf("[LayerNorm] Before ggml_scale for mean\n");
-    fflush(stdout);
     ggml_tensor* x_mean = ggml_scale(ctx, x_sum, 1.0f / (float)(n_rows * n_cols));
-    printf("[LayerNorm] After ggml_scale for mean: x_mean ne[0]=%lu ne[1]=%lu\n",
-           (unsigned long)x_mean->ne[0], (unsigned long)x_mean->ne[1]);
-    fflush(stdout);
 
-    printf("[LayerNorm] Before ggml_repeat for x_mean broadcast\n");
-    fflush(stdout);
-    ggml_tensor* x_mean_broadcast = ggml_repeat(ctx, x_mean, x);
-    printf("[LayerNorm] After ggml_repeat x_mean: ne[0]=%lu ne[1]=%lu\n",
-           (unsigned long)x_mean_broadcast->ne[0], (unsigned long)x_mean_broadcast->ne[1]);
-    fflush(stdout);
-
-    // Compute x - mean
-    printf("[LayerNorm] Before ggml_sub x - x_mean_broadcast\n");
-    fflush(stdout);
-    ggml_tensor* x_centered = ggml_sub(ctx, x, x_mean_broadcast);
-    printf("[LayerNorm] After ggml_sub\n");
-    fflush(stdout);
-
-    // Compute variance: mean((x - mean)^2)
-    printf("[LayerNorm] Before ggml_sqr\n");
-    fflush(stdout);
+    // Compute x - mean and variance
+    ggml_tensor* x_centered = ggml_sub(ctx, x, x_mean);
     ggml_tensor* x_centered_sq = ggml_sqr(ctx, x_centered);
-    printf("[LayerNorm] Before ggml_sum for variance\n");
-    fflush(stdout);
     ggml_tensor* var_sum = ggml_sum(ctx, x_centered_sq);
-    printf("[LayerNorm] Before ggml_scale for variance\n");
-    fflush(stdout);
     ggml_tensor* variance = ggml_scale(ctx, var_sum, 1.0f / (float)(n_rows * n_cols));
 
-    printf("[LayerNorm] Before ggml_repeat for variance broadcast\n");
-    fflush(stdout);
-    ggml_tensor* variance_broadcast = ggml_repeat(ctx, variance, x);
-    printf("[LayerNorm] After ggml_repeat variance\n");
-    fflush(stdout);
-
-    // Compute sqrt(var + eps)
-    printf("[LayerNorm] Before ggml_add var + eps\n");
-    fflush(stdout);
-    ggml_tensor* var_eps = ggml_add(ctx, variance_broadcast, ggml_new_scalar(ctx, GPT2Config::layer_norm_eps));
-    printf("[LayerNorm] Before ggml_sqrt\n");
-    fflush(stdout);
+    // Compute std = sqrt(var + eps)
+    ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, GPT2Config::layer_norm_eps));
     ggml_tensor* std = ggml_sqrt(ctx, var_eps);
-    printf("[LayerNorm] Before ggml_div\n");
-    fflush(stdout);
 
-    // Normalize: (x - mean) / std
+    // Normalize and scale/shift
     ggml_tensor* x_norm = ggml_div(ctx, x_centered, std);
-    printf("[LayerNorm] Before ggml_mul with gamma\n");
-    fflush(stdout);
-
-    // Scale and shift: gamma * x_norm + beta
     ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
-    printf("[LayerNorm] Before ggml_add with beta\n");
-    fflush(stdout);
     ggml_tensor* result = ggml_add(ctx, scaled, beta);
-    printf("[LayerNorm] END\n");
-    fflush(stdout);
     return result;
 }
 
@@ -103,9 +47,8 @@ ggml_tensor* RMSNorm::forward(ggml_context* ctx, ggml_tensor* x) {
     ggml_tensor* mean2 = ggml_mean(ctx, x2);
     ggml_tensor* rms_eps = ggml_add(ctx, mean2, ggml_new_scalar(ctx, GPT2Config::layer_norm_eps));
     ggml_tensor* rms = ggml_sqrt(ctx, rms_eps);
-    // Explicitly repeat rms to match x's shape
-    ggml_tensor* rms_broadcast = ggml_repeat(ctx, rms, x);
-    ggml_tensor* normalized = ggml_div(ctx, x, rms_broadcast);
+    // No need for explicit repeat - ggml_div handles broadcasting
+    ggml_tensor* normalized = ggml_div(ctx, x, rms);
     ggml_tensor* result = ggml_mul(ctx, normalized, weight);
     return result;
 }
@@ -184,11 +127,6 @@ ggml_tensor* Attention::forward(
     int head_dim = GPT2Config::head_dim;
     int seq_len = (int)ggml_nrows(x);
 
-    printf("[Debug Attn] START: x ne[0]=%lu ne[1]=%lu, c_attn_weight ne[0]=%lu ne[1]=%lu\n",
-           (unsigned long)x->ne[0], (unsigned long)x->ne[1],
-           (unsigned long)c_attn_weight->ne[0], (unsigned long)c_attn_weight->ne[1]);
-    fflush(stdout);
-
     // QKV projection: (seq_len, n_embd) @ (n_embd, 3*n_embd) = (seq_len, 3*n_embd)
     ggml_tensor* qkv = ggml_mul_mat(ctx, x, c_attn_weight);
     qkv = ggml_add(ctx, qkv, c_attn_bias);
@@ -197,16 +135,11 @@ ggml_tensor* Attention::forward(
     ggml_tensor* q = ggml_view_2d(ctx, qkv, n_embd, seq_len, n_embd * sizeof(float), 0);
     ggml_tensor* k = ggml_view_2d(ctx, qkv, n_embd, seq_len, n_embd * sizeof(float), n_embd * sizeof(float));
     ggml_tensor* v = ggml_view_2d(ctx, qkv, n_embd, seq_len, n_embd * sizeof(float), 2 * n_embd * sizeof(float));
-    printf("[Debug Attn] qkv: ne[0]=%lu, ne[1]=%lu\n", (unsigned long)qkv->ne[0], (unsigned long)qkv->ne[1]);
-    printf("[Debug Attn] q: ne[0]=%lu, ne[1]=%lu\n", (unsigned long)q->ne[0], (unsigned long)q->ne[1]);
 
     // Reshape to (seq_len, n_heads, head_dim)
     q = ggml_reshape_3d(ctx, q, seq_len, n_heads, head_dim);
     k = ggml_reshape_3d(ctx, k, seq_len, n_heads, head_dim);
     v = ggml_reshape_3d(ctx, v, seq_len, n_heads, head_dim);
-
-    printf("[Debug Attn] after reshape_3d q: ne[0]=%lu, ne[1]=%lu, ne[2]=%lu\n",
-           (unsigned long)q->ne[0], (unsigned long)q->ne[1], (unsigned long)q->ne[2]);
 
     // Handle KV cache storage and retrieval
     int total_kv_len = seq_len;
@@ -457,49 +390,16 @@ ggml_tensor* TransformerBlock::forward(
     int position,
     bool use_cache
 ) {
-    static int layer_num = 0;
-    printf("[TransformerBlock %d] START: x ne[0]=%lu ne[1]=%lu\n", layer_num, (unsigned long)x->ne[0], (unsigned long)x->ne[1]);
-    fflush(stdout);
-
     // Pre-norm architecture: LN1 -> Attention -> Residual
-    printf("[TransformerBlock %d] Before LN1\n", layer_num);
-    fflush(stdout);
     ggml_tensor* ln1_out = layer_norm(ctx, x, ln1.gamma, ln1.beta, GPT2Config::layer_norm_eps);
-    printf("[TransformerBlock %d] After LN1: ln1_out ne[0]=%lu ne[1]=%lu\n", layer_num, (unsigned long)ln1_out->ne[0], (unsigned long)ln1_out->ne[1]);
-    fflush(stdout);
-
-    printf("[TransformerBlock %d] Before Attention\n", layer_num);
-    fflush(stdout);
     ggml_tensor* attn_out = attention.forward(ctx, gf, ln1_out, position, use_cache);
-    printf("[TransformerBlock %d] After Attention: attn_out ne[0]=%lu ne[1]=%lu\n", layer_num, (unsigned long)attn_out->ne[0], (unsigned long)attn_out->ne[1]);
-    fflush(stdout);
-
-    printf("[TransformerBlock %d] Before residual add 1\n", layer_num);
-    fflush(stdout);
     ggml_tensor* h1 = ggml_add(ctx, x, attn_out);
-    printf("[TransformerBlock %d] After residual 1: h1 ne[0]=%lu ne[1]=%lu\n", layer_num, (unsigned long)h1->ne[0], (unsigned long)h1->ne[1]);
-    fflush(stdout);
 
     // LN2 -> FFN -> Residual
-    printf("[TransformerBlock %d] Before LN2\n", layer_num);
-    fflush(stdout);
     ggml_tensor* ln2_out = layer_norm(ctx, h1, ln2.gamma, ln2.beta, GPT2Config::layer_norm_eps);
-    printf("[TransformerBlock %d] After LN2: ln2_out ne[0]=%lu ne[1]=%lu\n", layer_num, (unsigned long)ln2_out->ne[0], (unsigned long)ln2_out->ne[1]);
-    fflush(stdout);
-
-    printf("[TransformerBlock %d] Before FFN\n", layer_num);
-    fflush(stdout);
     ggml_tensor* ffn_out = ffn.forward(ctx, gf, ln2_out);
-    printf("[TransformerBlock %d] After FFN: ffn_out ne[0]=%lu ne[1]=%lu\n", layer_num, (unsigned long)ffn_out->ne[0], (unsigned long)ffn_out->ne[1]);
-    fflush(stdout);
-
-    printf("[TransformerBlock %d] Before residual add 2\n", layer_num);
-    fflush(stdout);
     ggml_tensor* h2 = ggml_add(ctx, h1, ffn_out);
-    printf("[TransformerBlock %d] After residual 2: h2 ne[0]=%lu ne[1]=%lu\n", layer_num, (unsigned long)h2->ne[0], (unsigned long)h2->ne[1]);
-    fflush(stdout);
 
-    layer_num++;
     return h2;
 }
 
@@ -589,15 +489,12 @@ ggml_tensor* rms_norm(
     float eps
 ) {
     // RMSNorm: x / sqrt(mean(x^2) + eps) * weight
-    // GGML's ggml_rms_norm(ctx, x, eps) doesn't take a weight tensor
-    // So we compute manually and apply weight
     ggml_tensor* x2 = ggml_sqr(ctx, x);
-    ggml_tensor* mean2 = ggml_mean(ctx, x2);  // Over all elements - approximation
+    ggml_tensor* mean2 = ggml_mean(ctx, x2);
     ggml_tensor* var_eps = ggml_add(ctx, mean2, ggml_new_scalar(ctx, eps));
     ggml_tensor* rms = ggml_sqrt(ctx, var_eps);
-    // Explicitly repeat rms to match x's shape
-    ggml_tensor* rms_broadcast = ggml_repeat(ctx, rms, x);
-    ggml_tensor* normalized = ggml_div(ctx, x, rms_broadcast);
+    // No need for explicit repeat - ggml_div handles broadcasting
+    ggml_tensor* normalized = ggml_div(ctx, x, rms);
     ggml_tensor* result = ggml_mul(ctx, normalized, weight);
     return result;
 }

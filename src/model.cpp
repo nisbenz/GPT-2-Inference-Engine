@@ -691,11 +691,6 @@ void GPT2Model::build_graph(
 
     ggml_tensor* h = ggml_add(ctx_, input_embd, pos_embd);
     // h: (seq_len, N_EMBD)
-    printf("[Debug Model] input_embd ne[0]=%lu ne[1]=%lu, pos_embd ne[0]=%lu ne[1]=%lu, h ne[0]=%lu ne[1]=%lu\n",
-           (unsigned long)input_embd->ne[0], (unsigned long)input_embd->ne[1],
-           (unsigned long)pos_embd->ne[0], (unsigned long)pos_embd->ne[1],
-           (unsigned long)h->ne[0], (unsigned long)h->ne[1]);
-    fflush(stdout);
 
     // Pass through transformer layers
     for (int i = 0; i < N_LAYERS; i++) {
