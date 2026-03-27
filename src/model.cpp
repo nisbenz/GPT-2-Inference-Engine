@@ -619,13 +619,11 @@ std::vector<float> GPT2Model::forward(
     std::vector<float> logits(VOCAB_SIZE, 0.0f);
 
     if (logits_tensor_) {
-        // logits_tensor_ is (seq_len, VOCAB_SIZE)
-        // We want the last row, which is at index seq_len - 1
+        // logits_tensor_: ne[0]=VOCAB_SIZE, ne[1]=seq_len
+        // Column-major: element (v, s) at offset s * VOCAB_SIZE + v
+        // Last seq position s = seq_len - 1
         int seq_len = input_ids.size();
         int last_idx = (seq_len - 1) * VOCAB_SIZE;
-
-        // Copy the last row of logits
-        // First get the pointer to logits data
         const float* logits_data = (const float*)logits_tensor_->data;
         for (int i = 0; i < VOCAB_SIZE; i++) {
             logits[i] = logits_data[last_idx + i];
@@ -667,8 +665,8 @@ void GPT2Model::build_graph(
         }
     }
     // input_embd: (seq_len * N_EMBD, 1) = (12288, 1) for seq_len=16
-    // Reshape to (seq_len, N_EMBD)
-    input_embd = ggml_reshape_2d(ctx_, input_embd, seq_len, N_EMBD);
+    // Reshape to ne[0]=N_EMBD, ne[1]=seq_len (standard ggml convention)
+    input_embd = ggml_reshape_2d(ctx_, input_embd, N_EMBD, seq_len);
 
     // Add positional embeddings
     ggml_tensor* pos_embd = nullptr;
@@ -686,11 +684,11 @@ void GPT2Model::build_graph(
         }
     }
     // pos_embd: (seq_len * N_EMBD, 1) = (12288, 1)
-    pos_embd = ggml_reshape_2d(ctx_, pos_embd, seq_len, N_EMBD);
-    // pos_embd: (seq_len, N_EMBD)
+    pos_embd = ggml_reshape_2d(ctx_, pos_embd, N_EMBD, seq_len);
+    // pos_embd: ne[0]=N_EMBD, ne[1]=seq_len
 
     ggml_tensor* h = ggml_add(ctx_, input_embd, pos_embd);
-    // h: (seq_len, N_EMBD)
+    // h: ne[0]=N_EMBD, ne[1]=seq_len
 
     // Pass through transformer layers
     for (int i = 0; i < N_LAYERS; i++) {
@@ -704,10 +702,11 @@ void GPT2Model::build_graph(
     ggml_tensor* h_norm = layer_norm(ctx_, h, ln_f_.gamma, ln_f_.beta, GPT2Config::layer_norm_eps);
     ggml_build_forward_expand(&gf_, h_norm);
 
-    // LM head: h_norm @ lm_head^T
-    // lm_head is (VOCAB_SIZE, N_EMBD), we need (N_EMBD, VOCAB_SIZE)
-    // Result: (seq_len, VOCAB_SIZE)
-    logits_tensor_ = ggml_mul_mat(ctx_, h_norm, lm_head_);
+    // LM head: lm_head^T @ h_norm
+    // lm_head: ne[0]=N_EMBD, ne[1]=VOCAB_SIZE; h_norm: ne[0]=N_EMBD, ne[1]=seq_len
+    // ggml_mul_mat(lm_head, h_norm) = lm_head^T @ h_norm
+    // Result: ne[0]=VOCAB_SIZE, ne[1]=seq_len
+    logits_tensor_ = ggml_mul_mat(ctx_, lm_head_, h_norm);
     ggml_build_forward_expand(&gf_, logits_tensor_);
 }
 

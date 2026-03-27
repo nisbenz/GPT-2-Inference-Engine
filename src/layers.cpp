@@ -12,67 +12,20 @@ static inline ggml_tensor* ggml_new_scalar(ggml_context* ctx, float value) {
 // ============== LayerNorm ==============
 
 ggml_tensor* LayerNorm::forward(ggml_context* ctx, ggml_tensor* x) {
-    // LayerNorm: gamma * (x - mean) / sqrt(var + eps) + beta
-    // x shape: (seq_len, n_embd) = (n_rows, n_cols)
-
-    int n_rows = (int)x->ne[0];
-    int n_cols = (int)x->ne[1];
-    int n = n_rows * n_cols;
-
-    // Make x contiguous and flatten to 1D
-    ggml_tensor* x_cont = ggml_cont(ctx, x);
-    ggml_tensor* x_flat = ggml_reshape_1d(ctx, x_cont, n);
-
-    // Compute sum and mean in 1D
-    ggml_tensor* x_sum = ggml_sum(ctx, x_flat);
-    ggml_tensor* mean = ggml_scale(ctx, x_sum, 1.0f / (float)n);
-
-    // Center: x - mean
-    ggml_tensor* x_centered = ggml_sub(ctx, x_flat, mean);
-
-    // Square and compute variance
-    ggml_tensor* x_centered_sq = ggml_sqr(ctx, x_centered);
-    ggml_tensor* var_sum = ggml_sum(ctx, x_centered_sq);
-    ggml_tensor* variance = ggml_scale(ctx, var_sum, 1.0f / (float)n);
-
-    // std = sqrt(variance + eps)
-    ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, GPT2Config::layer_norm_eps));
-    ggml_tensor* std = ggml_sqrt(ctx, var_eps);
-
-    // Normalize: (x - mean) / std
-    ggml_tensor* x_norm = ggml_div(ctx, x_centered, std);
-
-    // x_norm is 1D, make contiguous then reshape to 2D
-    ggml_tensor* x_norm_cont = ggml_cont(ctx, x_norm);
-    ggml_tensor* x_norm_2d = ggml_reshape_2d(ctx, x_norm_cont, n_rows, n_cols);
-    fprintf(stderr, "DEBUG LN: x_norm_2d (%ld, %ld)\n", x_norm_2d->ne[0], x_norm_2d->ne[1]);
-
-    // gamma and beta are (n_cols,), reshape to (1, n_cols) for broadcasting
-    ggml_tensor* gamma_cont = ggml_cont(ctx, gamma);
-    ggml_tensor* gamma_2d = ggml_reshape_2d(ctx, gamma_cont, 1, n_cols);
-    fprintf(stderr, "DEBUG LN: gamma_2d (%ld, %ld)\n", gamma_2d->ne[0], gamma_2d->ne[1]);
-    ggml_tensor* beta_cont = ggml_cont(ctx, beta);
-    ggml_tensor* beta_2d = ggml_reshape_2d(ctx, beta_cont, 1, n_cols);
-    fprintf(stderr, "DEBUG LN: beta_2d (%ld, %ld)\n", beta_2d->ne[0], beta_2d->ne[1]);
-
-    // Scale and shift: (n_rows, n_cols) * (1, n_cols) + (1, n_cols)
-    ggml_tensor* scaled = ggml_mul(ctx, x_norm_2d, gamma_2d);
-    fprintf(stderr, "DEBUG LN: scaled (%ld, %ld)\n", scaled->ne[0], scaled->ne[1]);
-    ggml_tensor* result = ggml_add(ctx, scaled, beta_2d);
-
+    // x: ne[0]=n_embd, ne[1]=seq_len
+    // ggml_norm normalizes along ne[0] (per-token), which is exactly LayerNorm
+    ggml_tensor* x_norm = ggml_norm(ctx, x, GPT2Config::layer_norm_eps);
+    // gamma, beta: ne[0]=n_embd — broadcasts over ne[1]=seq_len
+    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
+    ggml_tensor* result = ggml_add(ctx, scaled, beta);
     return result;
 }
 
 // ============== RMSNorm ==============
 
 ggml_tensor* RMSNorm::forward(ggml_context* ctx, ggml_tensor* x) {
-    // RMSNorm: x / sqrt(mean(x^2) + eps) * weight
-    ggml_tensor* x2 = ggml_sqr(ctx, x);
-    ggml_tensor* mean2 = ggml_mean(ctx, x2);
-    ggml_tensor* rms_eps = ggml_add(ctx, mean2, ggml_new_scalar(ctx, GPT2Config::layer_norm_eps));
-    ggml_tensor* rms = ggml_sqrt(ctx, rms_eps);
-    // No need for explicit repeat - ggml_div handles broadcasting
-    ggml_tensor* normalized = ggml_div(ctx, x, rms);
+    // ggml_rms_norm normalizes along ne[0] per row
+    ggml_tensor* normalized = ggml_rms_norm(ctx, x, GPT2Config::layer_norm_eps);
     ggml_tensor* result = ggml_mul(ctx, normalized, weight);
     return result;
 }
@@ -81,9 +34,9 @@ ggml_tensor* RMSNorm::forward(ggml_context* ctx, ggml_tensor* x) {
 
 ggml_tensor* GELU::forward(ggml_context* ctx, ggml_tensor* x) {
     // GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-    ggml_tensor* x3 = ggml_mul(ctx, ggml_mul(ctx, x, x), x);  // x^3
-    ggml_tensor* inner = ggml_add(ctx, x, ggml_scale(ctx, x3, GELU::GELU_A));  // x + 0.044715 * x^3
-    ggml_tensor* tanh_arg = ggml_scale(ctx, inner, GELU::GELU_SQRT2_OVER_PI);  // sqrt(2/pi) * inner
+    ggml_tensor* x3 = ggml_mul(ctx, ggml_mul(ctx, x, x), x);
+    ggml_tensor* inner = ggml_add(ctx, x, ggml_scale(ctx, x3, GELU::GELU_A));
+    ggml_tensor* tanh_arg = ggml_scale(ctx, inner, GELU::GELU_SQRT2_OVER_PI);
     ggml_tensor* tanh_result = ggml_tanh(ctx, tanh_arg);
     ggml_tensor* one_plus_tanh = ggml_add(ctx, tanh_result, ggml_new_scalar(ctx, 1.0f));
     ggml_tensor* result = ggml_scale(ctx, ggml_mul(ctx, x, one_plus_tanh), 0.5f);
@@ -106,32 +59,30 @@ Attention::Attention()
 {}
 
 void Attention::init_cache(ggml_context* ctx) {
-    // KV cache shape: (n_heads, seq_len, head_dim)
-    // We allocate max sequence length
+    // KV cache: ne[0]=head_dim, ne[1]=context_length, ne[2]=n_heads
     k_cache = ggml_new_tensor_3d(ctx, GGML_TYPE_F32,
                                   GPT2Config::head_dim,
-                                  GPT2Config::n_heads,
-                                  GPT2Config::context_length);
+                                  GPT2Config::context_length,
+                                  GPT2Config::n_heads);
     v_cache = ggml_new_tensor_3d(ctx, GGML_TYPE_F32,
-                                  GPT2Config::n_heads,
                                   GPT2Config::head_dim,
-                                  GPT2Config::context_length);
+                                  GPT2Config::context_length,
+                                  GPT2Config::n_heads);
     ggml_set_name(k_cache, "k_cache");
     ggml_set_name(v_cache, "v_cache");
 }
 
 ggml_tensor* Attention::causal_mask(ggml_context* ctx, int seq_len) {
-    // Create causal mask: lower triangular matrix
-    // mask[i,j] = 0 if j <= i (can attend), -inf if j > i (cannot attend)
+    // Causal mask: ne[0]=seq_len (kv), ne[1]=seq_len (query)
+    // mask[k,q] = 0 if k <= q, -inf if k > q
     ggml_tensor* mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, seq_len, seq_len);
-
     float* data = (float*)mask->data;
-    for (int i = 0; i < seq_len; i++) {
-        for (int j = 0; j < seq_len; j++) {
-            data[i * seq_len + j] = (j > i) ? -10000.0f : 0.0f;
+    for (int q = 0; q < seq_len; q++) {
+        for (int k = 0; k < seq_len; k++) {
+            // Column-major: (k, q) at index q * seq_len + k
+            data[q * seq_len + k] = (k > q) ? -INFINITY : 0.0f;
         }
     }
-
     return mask;
 }
 
@@ -142,144 +93,78 @@ ggml_tensor* Attention::forward(
     int position,
     bool use_cache
 ) {
-    // x: (seq_len, n_embd)
-    // position: current position in sequence (for KV cache indexing)
-    // use_cache: if true, store/retrieve from KV cache
-
+    // x: ne[0]=n_embd, ne[1]=seq_len
     int n_heads = GPT2Config::n_heads;
     int n_embd = GPT2Config::n_embd;
     int head_dim = GPT2Config::head_dim;
-    int seq_len = (int)ggml_nrows(x);
+    int seq_len = (int)x->ne[1];
 
-    // QKV projection: (seq_len, n_embd) @ (n_embd, 3*n_embd) = (seq_len, 3*n_embd)
-    //
-    // GGML's ggml_mul_mat requires BOTH tensors to have the same ne[0] (first dimension).
-    // This is different from standard matmul!
-    // For standard A @ B = C where A is (m,n) and B is (n,k), we get C is (m,k).
-    // GGML expects: A has ne=(k,m), B has ne=(k,n), result ne=(m,n).
-    //
-    // Our x is (seq_len, n_embd) = (16, 768) and weight is (n_embd, 3*n_embd) = (768, 2304)
-    // To use GGML: transpose x to (n_embd, seq_len) = (768, 16), weight stays (768, 2304)
-    // Then GGML matmul gives (seq_len, 3*n_embd) = (16, 2304)
+    // ---- QKV projection ----
+    // c_attn_weight: ne[0]=n_embd, ne[1]=3*n_embd
+    // ggml_mul_mat(W, x) = W^T @ x; both ne[0]=n_embd
+    // Result: ne[0]=3*n_embd, ne[1]=seq_len
+    ggml_tensor* qkv = ggml_mul_mat(ctx, c_attn_weight, x);
+    qkv = ggml_add(ctx, qkv, c_attn_bias);
 
-    ggml_tensor* x_t = ggml_transpose(ctx, x);
-    ggml_tensor* x_cont = ggml_cont(ctx, x_t);
-    ggml_tensor* x_reshaped = ggml_reshape_2d(ctx, x_cont, x->ne[1], x->ne[0]); // (n_embd, seq_len)
-    ggml_tensor* w_reshaped = ggml_reshape_2d(ctx, c_attn_weight, c_attn_weight->ne[0], c_attn_weight->ne[1]); // (n_embd, 3*n_embd)
+    // ---- Split Q, K, V along ne[0] ----
+    // Each chunk: ne[0]=n_embd, ne[1]=seq_len
+    size_t es = ggml_element_size(qkv);
+    ggml_tensor* q = ggml_view_2d(ctx, qkv, n_embd, seq_len,
+                                   qkv->nb[1], 0);
+    ggml_tensor* k = ggml_view_2d(ctx, qkv, n_embd, seq_len,
+                                   qkv->nb[1], n_embd * es);
+    ggml_tensor* v = ggml_view_2d(ctx, qkv, n_embd, seq_len,
+                                   qkv->nb[1], 2 * n_embd * es);
 
-    ggml_tensor* qkv = ggml_mul_mat(ctx, x_reshaped, w_reshaped);
-    // c_attn_bias is (3*n_embd,), reshape to (1, 3*n_embd) for broadcasting over rows
-    ggml_tensor* bias_2d = ggml_reshape_2d(ctx, c_attn_bias, 1, c_attn_bias->ne[0]);
-    qkv = ggml_add(ctx, qkv, bias_2d);
+    // ---- Reshape to separate heads ----
+    // n_embd = n_heads * head_dim, so reshape ne[0] into (head_dim, n_heads)
+    // Result: ne[0]=head_dim, ne[1]=n_heads, ne[2]=seq_len
+    ggml_tensor* Q = ggml_reshape_3d(ctx, ggml_cont(ctx, q), head_dim, n_heads, seq_len);
+    ggml_tensor* K = ggml_reshape_3d(ctx, ggml_cont(ctx, k), head_dim, n_heads, seq_len);
+    ggml_tensor* V = ggml_reshape_3d(ctx, ggml_cont(ctx, v), head_dim, n_heads, seq_len);
 
-    // Split into q, k, v - each (n_embd, seq_len) in row-major
-    // qkv is (3*n_embd, seq_len), we split by rows
-    ggml_tensor* q = ggml_view_2d(ctx, qkv, n_embd, seq_len, n_embd * sizeof(float), 0);
-    ggml_tensor* k = ggml_view_2d(ctx, qkv, n_embd, seq_len, n_embd * sizeof(float), n_embd * sizeof(float));
-    ggml_tensor* v = ggml_view_2d(ctx, qkv, n_embd, seq_len, n_embd * sizeof(float), 2 * n_embd * sizeof(float));
+    // Permute to (head_dim, seq_len, n_heads) for batched per-head matmul
+    Q = ggml_permute(ctx, Q, 0, 2, 1, 3);
+    K = ggml_permute(ctx, K, 0, 2, 1, 3);
+    V = ggml_permute(ctx, V, 0, 2, 1, 3);
 
-    // Handle KV cache storage and retrieval
-    // Cache is complex - skip it for now and just use k, v directly
-    int total_kv_len = seq_len;
-    // k, v are (n_embd, seq_len) where n_embd = n_heads * head_dim
-    // Memory layout: for head h, dimension d: element at row (h*head_dim + d)
-    //
-    // Simple per-head attention: for each head h
-    //   Q_h = rows h*head_dim to (h+1)*head_dim of q     -> (head_dim, seq_len)
-    //   K_h = rows h*head_dim to (h+1)*head_dim of k     -> (head_dim, total_kv_len)
-    //   V_h = rows h*head_dim to (h+1)*head_dim of v     -> (head_dim, total_kv_len)
-    //
-    //   scores_h = Q_h^T @ K_h  -> (seq_len, total_kv_len) [GGML: same ne[0]=head_dim]
-    //   scores_h = mask + softmax
-    //   attn_h = scores_h @ V_h^T -> (seq_len, head_dim)
+    // ---- Attention scores ----
+    // ggml_mul_mat(K, Q) = K^T @ Q, batched over ne[2]=n_heads
+    // Both ne[0]=head_dim; result: ne[0]=seq_len, ne[1]=seq_len, ne[2]=n_heads
+    ggml_tensor* scores = ggml_mul_mat(ctx, K, Q);
+    scores = ggml_scale(ctx, scores, 1.0f / std::sqrt((float)head_dim));
 
-    // Allocate output: (seq_len, n_embd) in row-major
-    ggml_tensor* attn_out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, seq_len, n_embd);
+    // ---- Causal mask ----
+    // 2D mask (seq_len, seq_len) broadcasts over ne[2]=n_heads
+    ggml_tensor* mask = causal_mask(ctx, seq_len);
+    scores = ggml_add(ctx, scores, mask);
 
-    // Loop over each head
-    for (int h = 0; h < n_heads; h++) {
-        int head_offset = h * head_dim;
+    // ---- Softmax along ne[0] (over kv positions per query) ----
+    ggml_tensor* attn_weights = ggml_soft_max(ctx, scores);
 
-        // Extract Q_h: rows head_offset to head_offset+head_dim from q
-        // q: (n_embd, seq_len), we want rows [head_offset, head_offset+head_dim), all seq_len cols
-        // This view is non-contiguous (stride n_embd instead of head_dim), so copy to contiguous tensor
-        ggml_tensor* q_h_view = ggml_view_2d(ctx, q,
-                                        head_dim, seq_len,
-                                        q->ne[0] * sizeof(float),  // row stride = n_embd * sizeof(float)
-                                        head_offset * sizeof(float)); // byte offset to start of head
+    // ---- Weighted sum of values ----
+    // V: ne[0]=head_dim, ne[1]=seq_len, ne[2]=n_heads (after permute, non-contiguous)
+    // Need V with ne[0]=seq_len for matmul with attn_weights
+    // Permute V: swap ne[0] and ne[1] -> (seq_len, head_dim, n_heads)
+    ggml_tensor* V_t = ggml_permute(ctx, V, 1, 0, 2, 3);
 
-        // K_h: same extraction from k
-        ggml_tensor* k_h_view = ggml_view_2d(ctx, k,
-                                        head_dim, total_kv_len,
-                                        k->ne[0] * sizeof(float),
-                                        head_offset * sizeof(float));
+    // ggml_mul_mat(V_t, attn_weights) = V_t^T @ attn_weights
+    // V_t ne[0]=seq_len, attn_weights ne[0]=seq_len — match
+    // Result: ne[0]=head_dim, ne[1]=seq_len, ne[2]=n_heads
+    ggml_tensor* attn_out = ggml_mul_mat(ctx, V_t, attn_weights);
 
-        // V_h: same extraction from v
-        ggml_tensor* v_h_view = ggml_view_2d(ctx, v,
-                                        head_dim, total_kv_len,
-                                        v->ne[0] * sizeof(float),
-                                        head_offset * sizeof(float));
+    // ---- Recombine heads ----
+    // Permute to (head_dim, n_heads, seq_len) then reshape to (n_embd, seq_len)
+    attn_out = ggml_permute(ctx, attn_out, 0, 2, 1, 3);
+    attn_out = ggml_cont(ctx, attn_out);
+    attn_out = ggml_reshape_2d(ctx, attn_out, n_embd, seq_len);
 
-        // Copy views to contiguous tensors (ggml_cpy works element-by-element)
-        ggml_tensor* q_h = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head_dim, seq_len);
-        q_h = ggml_cpy(ctx, q_h_view, q_h);
-
-        ggml_tensor* k_h = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head_dim, total_kv_len);
-        k_h = ggml_cpy(ctx, k_h_view, k_h);
-
-        ggml_tensor* v_h = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head_dim, total_kv_len);
-        v_h = ggml_cpy(ctx, v_h_view, v_h);
-
-        // Q_h is (head_dim, seq_len), K_h is (head_dim, total_kv_len)
-        // For GGML matmul: same ne[0] on both -> result is (seq_len, total_kv_len)
-        ggml_tensor* scores_h = ggml_mul_mat(ctx, q_h, k_h);
-
-        // Scale by 1/sqrt(head_dim)
-        scores_h = ggml_scale(ctx, scores_h, 1.0f / std::sqrt((float)head_dim));
-
-        // Apply causal mask
-        ggml_tensor* mask_h = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, seq_len, total_kv_len);
-        float* mask_data = (float*)mask_h->data;
-        for (int i = 0; i < seq_len; i++) {
-            int token_pos = position + i;
-            for (int j = 0; j < total_kv_len; j++) {
-                size_t idx = i + j * seq_len;  // column-major
-                mask_data[idx] = (j > token_pos) ? -10000.0f : 0.0f;
-            }
-        }
-        scores_h = ggml_add(ctx, scores_h, mask_h);
-
-        // Softmax
-        ggml_tensor* attn_h = ggml_soft_max(ctx, scores_h);
-
-        // attn_h: (seq_len, total_kv_len), V_h: (head_dim, total_kv_len)
-        // For GGML: need same ne[0], so transpose attn_h to (total_kv_len, seq_len)
-        // Result: (seq_len, head_dim)
-        ggml_tensor* attn_h_t = ggml_transpose(ctx, attn_h);
-        ggml_tensor* output_h = ggml_mul_mat(ctx, attn_h_t, v_h);
-
-        // Copy output_h into attn_out at column offset h*head_dim
-        ggml_tensor* out_cols = ggml_view_2d(ctx, attn_out,
-                                             seq_len, head_dim,
-                                             n_embd * sizeof(float),
-                                             head_offset * sizeof(float));
-        ggml_tensor* copy_h = ggml_cpy(ctx, output_h, out_cols);
-        ggml_build_forward_expand(gf, copy_h);
-    }
-
-    // attn_out is now (seq_len, n_embd)
-
-    // Output projection: (seq_len, n_embd) @ (n_embd, n_embd) = (seq_len, n_embd)
-    // For GGML matmul: transpose attn_out to (n_embd, seq_len)
-    ggml_tensor* attn_out_t = ggml_transpose(ctx, attn_out);
-    ggml_tensor* attn_out_cont = ggml_cont(ctx, attn_out_t);
-    ggml_tensor* attn_out_reshaped = ggml_reshape_2d(ctx, attn_out_cont, attn_out->ne[1], attn_out->ne[0]); // (n_embd, seq_len)
-    ggml_tensor* proj_reshaped = ggml_reshape_2d(ctx, c_proj_weight, c_proj_weight->ne[0], c_proj_weight->ne[1]); // (n_embd, n_embd)
-
-    ggml_tensor* out = ggml_mul_mat(ctx, attn_out_reshaped, proj_reshaped);
-    // c_proj_bias is (n_embd,), reshape to (1, n_embd) for broadcasting
-    ggml_tensor* proj_bias_2d = ggml_reshape_2d(ctx, c_proj_bias, 1, c_proj_bias->ne[0]);
-    out = ggml_add(ctx, out, proj_bias_2d);
+    // ---- Output projection ----
+    // c_proj_weight: ne[0]=n_embd, ne[1]=n_embd
+    // ggml_mul_mat(W, x) = W^T @ x; both ne[0]=n_embd
+    // Result: ne[0]=n_embd, ne[1]=seq_len
+    ggml_tensor* out = ggml_mul_mat(ctx, c_proj_weight, attn_out);
+    out = ggml_add(ctx, out, c_proj_bias);
 
     ggml_build_forward_expand(gf, out);
     return out;
@@ -289,8 +174,7 @@ void Attention::set_weights(
     const float* qkv_w, const float* qkv_b,
     const float* proj_w, const float* proj_b
 ) {
-    // This would copy weights to the GGML tensors
-    // In practice, weights are loaded directly into tensors during model loading
+    // Weights are loaded directly into tensors during model loading
 }
 
 // ============== FFN ==============
@@ -303,7 +187,6 @@ FFN::FFN()
 {}
 
 ggml_tensor* FFN::gelu(ggml_context* ctx, ggml_tensor* x) {
-    // GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     ggml_tensor* x3 = ggml_mul(ctx, ggml_mul(ctx, x, x), x);
     ggml_tensor* inner = ggml_add(ctx, x, ggml_scale(ctx, x3, GELU::GELU_A));
     ggml_tensor* tanh_arg = ggml_scale(ctx, inner, GELU::GELU_SQRT2_OVER_PI);
@@ -314,39 +197,22 @@ ggml_tensor* FFN::gelu(ggml_context* ctx, ggml_tensor* x) {
 }
 
 ggml_tensor* FFN::forward(ggml_context* ctx, ggml_cgraph* gf, ggml_tensor* x) {
-    // FFN: GELU(up_proj(x)) * down_proj(x)
+    // x: ne[0]=n_embd, ne[1]=seq_len
     //
-    // For GGML matmul, we need to transpose x since GGML requires same ne[0] for both tensors.
-    // x: (seq_len, n_embd) -> transpose to (n_embd, seq_len)
-    // up_proj weight: (n_embd, n_ffn)
-    // After GGML matmul: (seq_len, n_ffn)
-
-    ggml_tensor* x_t = ggml_transpose(ctx, x);
-    ggml_tensor* x_cont = ggml_cont(ctx, x_t);
-    ggml_tensor* x_reshaped = ggml_reshape_2d(ctx, x_cont, x->ne[1], x->ne[0]); // (n_embd, seq_len)
-
-    ggml_tensor* up_reshaped = ggml_reshape_2d(ctx, c_fc_weight, c_fc_weight->ne[0], c_fc_weight->ne[1]); // (n_embd, n_ffn)
-    ggml_tensor* up = ggml_mul_mat(ctx, x_reshaped, up_reshaped);
-    // c_fc_bias is (n_ffn,), reshape to (1, n_ffn) for broadcasting
-    ggml_tensor* fc_bias_2d = ggml_reshape_2d(ctx, c_fc_bias, 1, c_fc_bias->ne[0]);
-    up = ggml_add(ctx, up, fc_bias_2d);
-    // up: (seq_len, n_ffn)
+    // Up projection: c_fc_weight ne[0]=n_embd, ne[1]=n_ffn
+    // ggml_mul_mat(W, x) = W^T @ x; both ne[0]=n_embd
+    // Result: ne[0]=n_ffn, ne[1]=seq_len
+    ggml_tensor* up = ggml_mul_mat(ctx, c_fc_weight, x);
+    up = ggml_add(ctx, up, c_fc_bias);
 
     // GELU activation
     ggml_tensor* activated = gelu(ctx, up);
-    // activated: (seq_len, n_ffn)
 
-    // down_proj: (n_ffn, n_embd)
-    ggml_tensor* activated_t = ggml_transpose(ctx, activated);
-    ggml_tensor* activated_cont = ggml_cont(ctx, activated_t);
-    ggml_tensor* activated_reshaped = ggml_reshape_2d(ctx, activated_cont, activated->ne[1], activated->ne[0]); // (n_ffn, seq_len)
-
-    ggml_tensor* down_reshaped = ggml_reshape_2d(ctx, c_proj_weight, c_proj_weight->ne[0], c_proj_weight->ne[1]); // (n_ffn, n_embd)
-    ggml_tensor* down = ggml_mul_mat(ctx, activated_reshaped, down_reshaped);
-    // c_proj_bias is (n_embd,), reshape to (1, n_embd) for broadcasting
-    ggml_tensor* proj_bias_2d = ggml_reshape_2d(ctx, c_proj_bias, 1, c_proj_bias->ne[0]);
-    down = ggml_add(ctx, down, proj_bias_2d);
-    // down: (seq_len, n_embd)
+    // Down projection: c_proj_weight ne[0]=n_ffn, ne[1]=n_embd
+    // ggml_mul_mat(W, x) = W^T @ x; both ne[0]=n_ffn
+    // Result: ne[0]=n_embd, ne[1]=seq_len
+    ggml_tensor* down = ggml_mul_mat(ctx, c_proj_weight, activated);
+    down = ggml_add(ctx, down, c_proj_bias);
 
     return down;
 }
@@ -389,7 +255,6 @@ void TransformerBlock::build_graph(
     int position,
     bool use_cache
 ) {
-    // Pre-norm architecture
     ggml_tensor* ln1_out = layer_norm(ctx, x, ln1.gamma, ln1.beta, GPT2Config::layer_norm_eps);
     ggml_build_forward_expand(gf, ln1_out);
 
@@ -417,7 +282,9 @@ ggml_tensor* linear(
     ggml_tensor* weight,
     ggml_tensor* bias
 ) {
-    ggml_tensor* result = ggml_mul_mat(ctx, input, weight);
+    // ggml_mul_mat(W, x) = W^T @ x
+    // weight ne[0] must match input ne[0]
+    ggml_tensor* result = ggml_mul_mat(ctx, weight, input);
     if (bias != nullptr) {
         result = ggml_add(ctx, result, bias);
     }
@@ -431,50 +298,11 @@ ggml_tensor* layer_norm(
     ggml_tensor* beta,
     float eps
 ) {
-    // LayerNorm: gamma * (x - mean) / sqrt(var + eps) + beta
-    // x shape: (seq_len, n_embd) = (n_rows, n_cols)
-
-    int n_rows = (int)x->ne[0];
-    int n_cols = (int)x->ne[1];
-    int n = n_rows * n_cols;
-
-    // Make x contiguous and flatten to 1D
-    ggml_tensor* x_cont = ggml_cont(ctx, x);
-    ggml_tensor* x_flat = ggml_reshape_1d(ctx, x_cont, n);
-
-    // Compute sum and mean in 1D
-    ggml_tensor* x_sum = ggml_sum(ctx, x_flat);
-    ggml_tensor* mean = ggml_scale(ctx, x_sum, 1.0f / (float)n);
-
-    // Center: x - mean
-    ggml_tensor* x_centered = ggml_sub(ctx, x_flat, mean);
-
-    // Square and compute variance
-    ggml_tensor* x_centered_sq = ggml_sqr(ctx, x_centered);
-    ggml_tensor* var_sum = ggml_sum(ctx, x_centered_sq);
-    ggml_tensor* variance = ggml_scale(ctx, var_sum, 1.0f / (float)n);
-
-    // std = sqrt(variance + eps)
-    ggml_tensor* var_eps = ggml_add(ctx, variance, ggml_new_scalar(ctx, eps));
-    ggml_tensor* std = ggml_sqrt(ctx, var_eps);
-
-    // Normalize: (x - mean) / std
-    ggml_tensor* x_norm = ggml_div(ctx, x_centered, std);
-
-    // x_norm is 1D, make contiguous then reshape to 2D
-    ggml_tensor* x_norm_cont = ggml_cont(ctx, x_norm);
-    ggml_tensor* x_norm_2d = ggml_reshape_2d(ctx, x_norm_cont, n_rows, n_cols);
-
-    // gamma and beta are (n_cols,), reshape to (1, n_cols) for broadcasting
-    ggml_tensor* gamma_cont = ggml_cont(ctx, gamma);
-    ggml_tensor* gamma_2d = ggml_reshape_2d(ctx, gamma_cont, 1, n_cols);
-    ggml_tensor* beta_cont = ggml_cont(ctx, beta);
-    ggml_tensor* beta_2d = ggml_reshape_2d(ctx, beta_cont, 1, n_cols);
-
-    // Scale and shift: (n_rows, n_cols) * (1, n_cols) + (1, n_cols)
-    ggml_tensor* scaled = ggml_mul(ctx, x_norm_2d, gamma_2d);
-    ggml_tensor* result = ggml_add(ctx, scaled, beta_2d);
-
+    // x: ne[0]=n_embd, ne[1]=seq_len
+    // ggml_norm normalizes along ne[0] per row — exactly LayerNorm
+    ggml_tensor* x_norm = ggml_norm(ctx, x, eps);
+    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
+    ggml_tensor* result = ggml_add(ctx, scaled, beta);
     return result;
 }
 
@@ -484,13 +312,7 @@ ggml_tensor* rms_norm(
     ggml_tensor* weight,
     float eps
 ) {
-    // RMSNorm: x / sqrt(mean(x^2) + eps) * weight
-    ggml_tensor* x2 = ggml_sqr(ctx, x);
-    ggml_tensor* mean2 = ggml_mean(ctx, x2);
-    ggml_tensor* var_eps = ggml_add(ctx, mean2, ggml_new_scalar(ctx, eps));
-    ggml_tensor* rms = ggml_sqrt(ctx, var_eps);
-    // No need for explicit repeat - ggml_div handles broadcasting
-    ggml_tensor* normalized = ggml_div(ctx, x, rms);
+    ggml_tensor* normalized = ggml_rms_norm(ctx, x, eps);
     ggml_tensor* result = ggml_mul(ctx, normalized, weight);
     return result;
 }
