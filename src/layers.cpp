@@ -34,8 +34,18 @@ ggml_tensor* LayerNorm::forward(ggml_context* ctx, ggml_tensor* x) {
 
     // Normalize and scale/shift
     ggml_tensor* x_norm = ggml_div(ctx, x_centered, std);
-    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
-    ggml_tensor* result = ggml_add(ctx, scaled, beta);
+
+    printf("[LayerNorm::forward] x_norm: %lux%lu, gamma: %lu, beta: %lu\n",
+           (unsigned long)x_norm->ne[0], (unsigned long)x_norm->ne[1],
+           (unsigned long)gamma->ne[0], (unsigned long)beta->ne[0]);
+    fflush(stdout);
+
+    // gamma and beta are 1D (n_cols,), need to reshape to 2D (1, n_cols) for broadcasting
+    ggml_tensor* gamma_2d = ggml_reshape_2d(ctx, gamma, 1, n_cols);
+    ggml_tensor* beta_2d = ggml_reshape_2d(ctx, beta, 1, n_cols);
+
+    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma_2d);
+    ggml_tensor* result = ggml_add(ctx, scaled, beta_2d);
     return result;
 }
 
@@ -506,11 +516,25 @@ ggml_tensor* layer_norm(
     fflush(stdout);
 
     // Scale and shift: gamma * x_norm + beta
-    printf("[layer_norm] computing scaled and result...\n");
+    printf("[layer_norm] x_norm shape: ne[0]=%lu ne[1]=%lu\n",
+           (unsigned long)x_norm->ne[0], (unsigned long)x_norm->ne[1]);
+    printf("[layer_norm] gamma shape: ne[0]=%lu\n", (unsigned long)gamma->ne[0]);
     fflush(stdout);
-    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
-    ggml_tensor* result = ggml_add(ctx, scaled, beta);
-    printf("[layer_norm] done\n");
+
+    printf("[layer_norm] calling ggml_mul (x_norm * gamma)...\n");
+    fflush(stdout);
+    // gamma and beta are 1D (n_cols,), need to reshape to 2D (1, n_cols) for broadcasting
+    ggml_tensor* gamma_2d = ggml_reshape_2d(ctx, gamma, 1, n_cols);
+    ggml_tensor* beta_2d = ggml_reshape_2d(ctx, beta, 1, n_cols);
+
+    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma_2d);
+    printf("[layer_norm] ggml_mul succeeded\n");
+    fflush(stdout);
+
+    printf("[layer_norm] calling ggml_add (scaled + beta)...\n");
+    fflush(stdout);
+    ggml_tensor* result = ggml_add(ctx, scaled, beta_2d);
+    printf("[layer_norm] ggml_add succeeded\n");
     fflush(stdout);
     return result;
 }
