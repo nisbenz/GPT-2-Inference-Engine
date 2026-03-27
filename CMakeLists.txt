@@ -22,22 +22,35 @@ include_directories(
     ${GGML_DIR}/src
     ${GGML_BUILD_DIR}/src
     ${GGML_BUILD_DIR}/src/ggml-cuda
+    ${GGML_BUILD_DIR}/src/ggml-cpu
     ${CMAKE_SOURCE_DIR}/src
 )
 
-# Find GGML libraries at their actual build locations
-set(GGML_LIBRARY "${GGML_BUILD_DIR}/src/libggml.so")
+# Libraries: In GGML 0.10+, the main ggml.so is a thin loader.
+# The actual GGML functions are compiled into the backend libraries.
+# Link directly to the actual library files, not the loader.
 set(GGML_CUDA_LIBRARY "${GGML_BUILD_DIR}/src/ggml-cuda/libggml-cuda.so")
+set(GGML_CPU_LIBRARY "${GGML_BUILD_DIR}/src/ggml-cpu/libggml-cpu.so")
+set(GGML_BASE_LIBRARY "${GGML_BUILD_DIR}/src/libggml-base.so")
 
-if(NOT EXISTS "${GGML_LIBRARY}")
-    message(FATAL_ERROR "GGML library not found: ${GGML_LIBRARY}")
+# Check which libraries actually exist
+set(GGML_LIBRARIES "")
+if(EXISTS "${GGML_CUDA_LIBRARY}")
+    list(APPEND GGML_LIBRARIES "${GGML_CUDA_LIBRARY}")
+    message(STATUS "Using GGML CUDA: ${GGML_CUDA_LIBRARY}")
 endif()
-if(NOT EXISTS "${GGML_CUDA_LIBRARY}")
-    message(FATAL_ERROR "GGML CUDA library not found: ${GGML_CUDA_LIBRARY}")
+if(EXISTS "${GGML_CPU_LIBRARY}")
+    list(APPEND GGML_LIBRARIES "${GGML_CPU_LIBRARY}")
+    message(STATUS "Using GGML CPU: ${GGML_CPU_LIBRARY}")
+endif()
+if(EXISTS "${GGML_BASE_LIBRARY}")
+    list(APPEND GGML_LIBRARIES "${GGML_BASE_LIBRARY}")
+    message(STATUS "Using GGML BASE: ${GGML_BASE_LIBRARY}")
 endif()
 
-message(STATUS "Found GGML: ${GGML_LIBRARY}")
-message(STATUS "Found GGML_CUDA: ${GGML_CUDA_LIBRARY}")
+if(NOT GGML_LIBRARIES)
+    message(FATAL_ERROR "No GGML libraries found in ${GGML_BUILD_DIR}/src/")
+endif()
 
 # Source files
 file(GLOB SOURCES
@@ -47,10 +60,9 @@ file(GLOB SOURCES
 # Executable
 add_executable(gpt2 ${SOURCES})
 
-# Link GGML libraries (order matters: ggml-cuda depends on ggml)
+# Link libraries
 target_link_libraries(gpt2
-    ${GGML_CUDA_LIBRARY}
-    ${GGML_LIBRARY}
+    ${GGML_LIBRARIES}
     ${CUDA_LIBRARIES}
     pthread
     m
