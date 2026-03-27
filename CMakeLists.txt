@@ -5,8 +5,10 @@ project(gpt2_inference LANGUAGES C CXX CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# GGML directory (parent of this project when cloned)
-set(GGML_DIR "${CMAKE_SOURCE_DIR}/../ggml")
+# GGML directory (parent of this project when cloned, overridable via -DGGML_DIR=/path/to/ggml)
+if(NOT DEFINED GGML_DIR)
+    set(GGML_DIR "${CMAKE_SOURCE_DIR}/../ggml")
+endif()
 
 # Include directories
 include_directories(

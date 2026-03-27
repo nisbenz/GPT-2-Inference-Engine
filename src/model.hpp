@@ -3,7 +3,7 @@
 #include "layers.hpp"
 #include "kv_cache.hpp"
 #include "tokenizer.hpp"
-#include <ggml/ggml.h>
+#include <ggml.h>
 #include <string>
 #include <vector>
 #include <memory>
