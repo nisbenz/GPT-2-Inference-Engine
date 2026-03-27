@@ -436,7 +436,6 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                         failed++;
                     } else if (t.type == GGUF_TID_Q8_0_ALT) {
                         // Q8_0 variant (type 30): 2-byte scale (float16) + 32 int8 values per block
-                        printf("  [Debug] Dequantizing Q8_0 tensor '%s', %lu bytes\n", t.name.c_str(), (unsigned long)actual_nbytes);
                         std::vector<uint8_t> qdata(actual_nbytes);
                         read_tensor_data(gguf, t, qdata.data(), actual_nbytes);
                         auto* dst_f = (float*)dst->data;

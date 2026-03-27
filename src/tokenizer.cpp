@@ -39,9 +39,7 @@ bool GPT2Tokenizer::load(const std::string& vocab_path, const std::string& merge
         return false;
     }
 
-    // Parse vocab JSON (simplified - expects the GPT-2 vocab format)
-    // GPT-2 vocab is a dict of {token: id} where token may contain UTF-8 or special chars like Ġ
-    // Read entire vocab file into a string (vocab.json is typically a single line)
+    // Parse vocab JSON string (extracts keys and IDs)
     std::string json_str((std::istreambuf_iterator<char>(vocab_file)),
                           std::istreambuf_iterator<char>());
 
@@ -118,7 +116,7 @@ bool GPT2Tokenizer::load(const std::string& vocab_path, const std::string& merge
             }
         }
 
-        // Decode GPT-2 byte encoder
+        // Decode GPT-2 byte encoder mapping back to raw bytes
         std::string decoded;
         for (size_t i = 0; i < token.size(); ) {
             unsigned char c = (unsigned char)token[i];
@@ -187,11 +185,6 @@ bool GPT2Tokenizer::load(const std::string& vocab_path, const std::string& merge
 
         if (bpe1.empty() || bpe2.empty()) continue;
 
-        // bpe1 and bpe2 are strings like "Ġt" and "he"
-        // We need their token IDs from the vocabulary.
-        // Since we only built id_to_token_, let's do a linear search (slow but works for init)
-        // Or better: decode the BPE strings the same way we decoded vocab keys,
-        // and find the matching decoded string in our id_to_token_ map.
         std::string decoded1, decoded2;
         
         auto decode_bpe = [](const std::string& bpe) {

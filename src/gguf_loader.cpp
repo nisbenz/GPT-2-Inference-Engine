@@ -89,13 +89,11 @@ GGUFFile load_gguf(const char* path) {
     if (magic != 0x46554747) {
         char buf[5] = {0};
         memcpy(buf, &magic, 4);
-        printf("[Debug] Magic Read: 0x%08X ('%s')\n", magic, buf);
         throw std::runtime_error("GGUF: invalid magic");
     }
     gguf.version = read_val<uint32_t>(fp);
     gguf.tensor_count = read_val<uint64_t>(fp);
     gguf.metadata_kv_count = read_val<uint64_t>(fp);
-    printf("[Debug] GGUF Version: %u, Tensors: %lu, Metadata KV: %lu\n", gguf.version, gguf.tensor_count, gguf.metadata_kv_count);
     for (uint64_t i = 0; i < gguf.metadata_kv_count; i++) {
         std::string key = read_gguf_string(fp);
         GGUFMetadataValueType vtype = read_val<GGUFMetadataValueType>(fp);
@@ -112,7 +110,6 @@ GGUFFile load_gguf(const char* path) {
     }
     uint32_t align = gguf.get_u32_or("general.alignment", 32);
     gguf.tensor_data_offset = (ftell(fp) + align - 1) & ~(uint64_t)(align - 1);
-    printf("[Debug] Tensor data offset: %lu\n", gguf.tensor_data_offset);
     return gguf;
 }
 
