@@ -415,7 +415,7 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                 size_t expected_nbytes = ggml_nbytes(dst);
                 size_t actual_nbytes = gguf_tensor_nbytes(t);
 
-                if (expected_nbytes == actual_nbytes || t.type == GGUF_TID_Q4_K) {
+                if (expected_nbytes == actual_nbytes || t.type == GGUF_TID_Q4_K || t.type == GGUF_TID_Q8_0_ALT) {
                     // Type matches or quantized (will be handled separately)
                     if (t.type == GGUF_TID_F32) {
                         read_tensor_data(gguf, t, dst->data, actual_nbytes);
@@ -434,7 +434,7 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                         std::cout << "  Warning: Q4_K tensor '" << t.name << "' needs dequantization, using random" << std::endl;
                         failed++;
                     } else if (t.type == GGUF_TID_Q8_0_ALT) {
-                        // Q8_0 variant (type 30): 2-byte scale + 32 int8 values per block
+                        // Q8_0 variant (type 30): 2-byte scale (float16) + 32 int8 values per block
                         printf("  [Debug] Dequantizing Q8_0 tensor '%s', %lu bytes\n", t.name.c_str(), (unsigned long)actual_nbytes);
                         std::vector<uint8_t> qdata(actual_nbytes);
                         read_tensor_data(gguf, t, qdata.data(), actual_nbytes);
@@ -442,9 +442,9 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                         size_t n_blocks = actual_nbytes / 34;  // 2 bytes scale + 32 bytes data
                         size_t j = 0;
                         for (size_t b = 0; b < n_blocks; b++) {
-                            // Read scale (float16, 2 bytes)
+                            // Read scale (float16, 2 bytes, little-endian)
                             uint16_t scale_bits = qdata[b * 34] | (qdata[b * 34 + 1] << 8);
-                            float scale = bf16_to_fp32(scale_bits);
+                            float scale = fp16_to_fp32(scale_bits);
                             // Read 32 quantized values
                             for (int i = 0; i < 32; i++) {
                                 int8_t val = (int8_t)qdata[b * 34 + 2 + i];
