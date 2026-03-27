@@ -143,13 +143,9 @@ ggml_tensor* Attention::forward(
     printf("[Attention] GGML_TYPE_F32=%d\n", GGML_TYPE_F32);
     fflush(stdout);
 
-    // Ensure tensors are contiguous and properly shaped
-    ggml_tensor* x_cont = ggml_contiguous(ctx, x);
-    // Force reshape to ensure proper shape interpretation
-    ggml_tensor* x_reshaped = ggml_reshape_2d(ctx, x_cont, x_cont->ne[0], x_cont->ne[1]);
-
-    ggml_tensor* w_cont = ggml_contiguous(ctx, c_attn_weight);
-    ggml_tensor* w_reshaped = ggml_reshape_2d(ctx, w_cont, w_cont->ne[0], w_cont->ne[1]);
+    // Use ggml_reshape_2d to ensure proper shape
+    ggml_tensor* x_reshaped = ggml_reshape_2d(ctx, x, x->ne[0], x->ne[1]);
+    ggml_tensor* w_reshaped = ggml_reshape_2d(ctx, c_attn_weight, c_attn_weight->ne[0], c_attn_weight->ne[1]);
 
     printf("[Attention] x_reshaped: %lux%lu type=%d\n", (unsigned long)x_reshaped->ne[0], (unsigned long)x_reshaped->ne[1], x_reshaped->type);
     printf("[Attention] w_reshaped: %lux%lu type=%d\n", (unsigned long)w_reshaped->ne[0], (unsigned long)w_reshaped->ne[1], w_reshaped->type);
