@@ -568,9 +568,14 @@ ggml_tensor* layer_norm(
     printf("[layer_norm function] Before ggml_sum\n");
     fflush(stdout);
     ggml_tensor* x_sum = ggml_sum(ctx, x);
-    printf("[layer_norm function] After ggml_sum\n");
+    printf("[layer_norm function] x_sum ne[0]=%lu ne[1]=%lu ne[2]=%lu ne[3]=%lu\n",
+           (unsigned long)x_sum->ne[0], (unsigned long)x_sum->ne[1],
+           (unsigned long)x_sum->ne[2], (unsigned long)x_sum->ne[3]);
     fflush(stdout);
     ggml_tensor* x_mean = ggml_scale(ctx, x_sum, 1.0f / (float)(n_rows * n_cols));
+    printf("[layer_norm function] x_mean ne[0]=%lu ne[1]=%lu\n",
+           (unsigned long)x_mean->ne[0], (unsigned long)x_mean->ne[1]);
+    fflush(stdout);
 
     printf("[layer_norm function] Before ggml_repeat for x_mean\n");
     fflush(stdout);
