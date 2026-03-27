@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "gguf_loader.h"
 #include <ggml-cpu.h>
 #include <iostream>
 #include <fstream>
@@ -17,6 +18,7 @@ GPT2Model::GPT2Model()
     , lm_head_(nullptr)
     , logits_data_(nullptr)
     , logits_size_(0)
+    , logits_tensor_(nullptr)
     , input_ids_tensor_(nullptr)
     , position_tensor_(nullptr)
 {
@@ -245,74 +247,260 @@ bool GPT2Model::load_huggingface_weights(const std::string& path) {
     return true;
 }
 
+// Forward declarations for helper functions
+static size_t extract_layer_idx(const std::string& name);
+static float fp16_to_fp32(uint16_t f16);
+
 bool GPT2Model::load_gguf_weights(const std::string& path) {
     std::cout << "Loading GGUF model from: " << path << std::endl;
 
-    // For now, use random initialization since GGUF loading API varies by version
-    // The actual tensor loading from GGUF requires matching the exact GGML/GGUF API version
-    std::cout << "Note: Using random initialization (GGUF loading requires API version check)" << std::endl;
-    std::random_device rd;
-    std::mt19937 gen(42);
-    std::uniform_real_distribution<float> dist(-0.1f, 0.1f);
+    try {
+        GGUFFile gguf = load_gguf(path.c_str());
 
-    // Initialize embeddings
-    float* wte_data = (float*)wte_->data;
-    for (size_t i = 0; i < VOCAB_SIZE * N_EMBD; i++) {
-        wte_data[i] = dist(gen);
-    }
+        // Print model info from metadata
+        std::string model_name = gguf.get_str("general.architecture", "unknown");
+        std::cout << "Model architecture: " << model_name << std::endl;
 
-    float* wpe_data = (float*)wpe_->data;
-    for (size_t i = 0; i < CONTEXT_LENGTH * N_EMBD; i++) {
-        wpe_data[i] = dist(gen);
-    }
+        uint32_t n_ctx = gguf.get_u32("llama.context_length", gguf.get_u32("gpt2.context_length", 1024));
+        uint32_t n_embd = gguf.get_u32("llama.embedding_length", gguf.get_u32("gpt2.embedding_length", 768));
+        uint32_t n_head = gguf.get_u32("llama.attention.head_count", gguf.get_u32("gpt2.attention.head_count", 12));
+        uint32_t n_layer = gguf.get_u32("llama.block_count", gguf.get_u32("gpt2.block_count", 12));
+        uint32_t n_ffn = gguf.get_u32("llama.feed_forward_length", gguf.get_u32("gpt2.feed_forward_length", 3072));
 
-    // Initialize layer weights
-    for (int i = 0; i < N_LAYERS; i++) {
-        float* ln1g = (float*)layers_[i].ln1.gamma->data;
-        float* ln1b = (float*)layers_[i].ln1.beta->data;
-        for (int j = 0; j < N_EMBD; j++) {
-            ln1g[j] = (j == 0) ? 1.0f : 0.0f;
-            ln1b[j] = 0.0f;
+        std::cout << "Config: ctx=" << n_ctx << " embd=" << n_embd << " head=" << n_head
+                  << " layer=" << n_layer << " ffn=" << n_ffn << std::endl;
+
+        // Print all tensor names and dimensions for debugging
+        std::cout << "\nTensors in GGUF file:" << std::endl;
+        for (size_t i = 0; i < gguf.tensors.size() && i < 20; i++) {
+            auto& t = gguf.tensors[i];
+            std::cout << "  " << i << ": " << t.name << " [";
+            for (uint32_t d = 0; d < t.n_dims; d++) {
+                std::cout << t.dims[d] << (d < t.n_dims - 1 ? ", " : "");
+            }
+            std::cout << "] type=" << t.type << std::endl;
+        }
+        if (gguf.tensors.size() > 20) {
+            std::cout << "  ... and " << (gguf.tensors.size() - 20) << " more tensors" << std::endl;
         }
 
-        float* c_attn_w = (float*)layers_[i].attention.c_attn_weight->data;
-        float* c_attn_b = (float*)layers_[i].attention.c_attn_bias->data;
-        float* c_proj_w = (float*)layers_[i].attention.c_proj_weight->data;
-        float* c_proj_b = (float*)layers_[i].attention.c_proj_bias->data;
+        // Map tensor names to our model weights
+        // The GGUF file uses names like "model.wte", "model.h.0.attn.c_attn.weight", etc.
+        // Our model uses names like "wte", "attn_c_attn_weight", etc.
 
-        for (size_t j = 0; j < (size_t)3 * N_EMBD * N_EMBD; j++) c_attn_w[j] = dist(gen);
-        for (size_t j = 0; j < (size_t)3 * N_EMBD; j++) c_attn_b[j] = dist(gen);
-        for (size_t j = 0; j < (size_t)N_EMBD * N_EMBD; j++) c_proj_w[j] = dist(gen);
-        for (size_t j = 0; j < (size_t)N_EMBD; j++) c_proj_b[j] = dist(gen);
+        std::cout << "\nLoading tensors..." << std::endl;
 
-        float* ln2g = (float*)layers_[i].ln2.gamma->data;
-        float* ln2b = (float*)layers_[i].ln2.beta->data;
-        for (int j = 0; j < N_EMBD; j++) {
-            ln2g[j] = (j == 0) ? 1.0f : 0.0f;
-            ln2b[j] = 0.0f;
+        int loaded = 0;
+        int failed = 0;
+
+        for (auto& t : gguf.tensors) {
+            // Find matching tensor in our model by name
+            ggml_tensor* dst = nullptr;
+
+            // Build a lookup map based on tensor name patterns
+            if (t.name == "model.wte" || t.name == "model.embed_tokens") {
+                dst = wte_;
+            } else if (t.name == "model.wpe" || t.name == "model.position_embeddings") {
+                dst = wpe_;
+            } else if (t.name == "model.ln_f.weight" || t.name == "model.final_layernorm.weight") {
+                dst = ln_f_.gamma;
+            } else if (t.name == "model.ln_f.bias" || t.name == "model.final_layernorm.bias") {
+                dst = ln_f_.beta;
+            } else if (t.name.find(".attn.c_attn.weight") != std::string::npos ||
+                       t.name.find(".attention.c_attn.weight") != std::string::npos) {
+                // Extract layer number
+                size_t layer_idx = extract_layer_idx(t.name);
+                if (layer_idx < N_LAYERS) {
+                    dst = layers_[layer_idx].attention.c_attn_weight;
+                }
+            } else if (t.name.find(".attn.c_attn.bias") != std::string::npos ||
+                       t.name.find(".attention.c_attn.bias") != std::string::npos) {
+                size_t layer_idx = extract_layer_idx(t.name);
+                if (layer_idx < N_LAYERS) {
+                    dst = layers_[layer_idx].attention.c_attn_bias;
+                }
+            } else if (t.name.find(".attn.c_proj.weight") != std::string::npos ||
+                       t.name.find(".attention.c_proj.weight") != std::string::npos) {
+                size_t layer_idx = extract_layer_idx(t.name);
+                if (layer_idx < N_LAYERS) {
+                    dst = layers_[layer_idx].attention.c_proj_weight;
+                }
+            } else if (t.name.find(".attn.c_proj.bias") != std::string::npos ||
+                       t.name.find(".attention.c_proj.bias") != std::string::npos) {
+                size_t layer_idx = extract_layer_idx(t.name);
+                if (layer_idx < N_LAYERS) {
+                    dst = layers_[layer_idx].attention.c_proj_bias;
+                }
+            } else if (t.name.find(".ln_1.weight") != std::string::npos ||
+                       t.name.find(".layer_norm_1.weight") != std::string::npos) {
+                size_t layer_idx = extract_layer_idx(t.name);
+                if (layer_idx < N_LAYERS) {
+                    dst = layers_[layer_idx].ln1.gamma;
+                }
+            } else if (t.name.find(".ln_1.bias") != std::string::npos ||
+                       t.name.find(".layer_norm_1.bias") != std::string::npos) {
+                size_t layer_idx = extract_layer_idx(t.name);
+                if (layer_idx < N_LAYERS) {
+                    dst = layers_[layer_idx].ln1.beta;
+                }
+            } else if (t.name.find(".ln_2.weight") != std::string::npos ||
+                       t.name.find(".layer_norm_2.weight") != std::string::npos) {
+                size_t layer_idx = extract_layer_idx(t.name);
+                if (layer_idx < N_LAYERS) {
+                    dst = layers_[layer_idx].ln2.gamma;
+                }
+            } else if (t.name.find(".ln_2.bias") != std::string::npos ||
+                       t.name.find(".layer_norm_2.bias") != std::string::npos) {
+                size_t layer_idx = extract_layer_idx(t.name);
+                if (layer_idx < N_LAYERS) {
+                    dst = layers_[layer_idx].ln2.beta;
+                }
+            } else if (t.name.find(".mlp.c_fc.weight") != std::string::npos ||
+                       t.name.find(".mlp.c_fc.bias") != std::string::npos) {
+                size_t layer_idx = extract_layer_idx(t.name);
+                if (layer_idx < N_LAYERS) {
+                    if (t.name.find(".weight") != std::string::npos) {
+                        dst = layers_[layer_idx].ffn.c_fc_weight;
+                    } else {
+                        dst = layers_[layer_idx].ffn.c_fc_bias;
+                    }
+                }
+            } else if (t.name.find(".mlp.c_proj.weight") != std::string::npos ||
+                       t.name.find(".mlp.c_proj.bias") != std::string::npos) {
+                size_t layer_idx = extract_layer_idx(t.name);
+                if (layer_idx < N_LAYERS) {
+                    if (t.name.find(".weight") != std::string::npos) {
+                        dst = layers_[layer_idx].ffn.c_proj_weight;
+                    } else {
+                        dst = layers_[layer_idx].ffn.c_proj_bias;
+                    }
+                }
+            }
+
+            if (dst) {
+                // Calculate expected size
+                size_t expected_nbytes = ggml_nbytes(dst);
+                size_t actual_nbytes = gguf_tensor_nbytes(t);
+
+                if (expected_nbytes == actual_nbytes || t.type == GGUF_TID_Q4_K) {
+                    // Type matches or quantized (will be handled separately)
+                    if (t.type == GGUF_TID_F32) {
+                        read_tensor_data(gguf, t, dst->data, actual_nbytes);
+                        loaded++;
+                    } else if (t.type == GGUF_TID_F16) {
+                        // Convert F16 to F32
+                        std::vector<uint16_t> f16_data(actual_nbytes / 2);
+                        read_tensor_data(gguf, t, f16_data.data(), actual_nbytes);
+                        auto* dst_f = (float*)dst->data;
+                        for (size_t j = 0; j < f16_data.size(); j++) {
+                            dst_f[j] = fp16_to_fp32(f16_data[j]);
+                        }
+                        loaded++;
+                    } else if (t.type == GGUF_TID_Q4_K) {
+                        // Q4_K_M quantization - needs special dequantization
+                        std::cout << "  Warning: Q4_K tensor '" << t.name << "' needs dequantization, using random" << std::endl;
+                        failed++;
+                    } else {
+                        std::cout << "  Warning: Unsupported type " << t.type << " for tensor '" << t.name << "'" << std::endl;
+                        failed++;
+                    }
+                } else {
+                    std::cout << "  Size mismatch for '" << t.name << "': expected " << expected_nbytes << " got " << actual_nbytes << std::endl;
+                    failed++;
+                }
+            }
         }
 
-        float* fc_w = (float*)layers_[i].ffn.c_fc_weight->data;
-        float* fc_b = (float*)layers_[i].ffn.c_fc_bias->data;
-        float* proj_w = (float*)layers_[i].ffn.c_proj_weight->data;
-        float* proj_b = (float*)layers_[i].ffn.c_proj_bias->data;
+        std::cout << "\nLoaded " << loaded << " tensors, " << failed << " failed/skipped" << std::endl;
 
-        for (size_t j = 0; j < (size_t)N_FFN * N_EMBD; j++) fc_w[j] = dist(gen);
-        for (size_t j = 0; j < (size_t)N_FFN; j++) fc_b[j] = dist(gen);
-        for (size_t j = 0; j < (size_t)N_EMBD * N_FFN; j++) proj_w[j] = dist(gen);
-        for (size_t j = 0; j < (size_t)N_EMBD; j++) proj_b[j] = dist(gen);
+        // For failed tensors, initialize with random weights
+        if (failed > 0) {
+            std::cout << "Initializing failed tensors with random weights..." << std::endl;
+            std::random_device rd;
+            std::mt19937 gen(42);
+            std::uniform_real_distribution<float> dist(-0.1f, 0.1f);
+
+            // Initialize all model weights
+            float* wte_data = (float*)wte_->data;
+            for (size_t i = 0; i < VOCAB_SIZE * N_EMBD; i++) wte_data[i] = dist(gen);
+
+            float* wpe_data = (float*)wpe_->data;
+            for (size_t i = 0; i < CONTEXT_LENGTH * N_EMBD; i++) wpe_data[i] = dist(gen);
+
+            for (int i = 0; i < N_LAYERS; i++) {
+                auto* ln1g = (float*)layers_[i].ln1.gamma->data;
+                auto* ln1b = (float*)layers_[i].ln1.beta->data;
+                for (int j = 0; j < N_EMBD; j++) { ln1g[j] = (j == 0) ? 1.0f : 0.0f; ln1b[j] = 0.0f; }
+
+                auto* c_attn_w = (float*)layers_[i].attention.c_attn_weight->data;
+                auto* c_attn_b = (float*)layers_[i].attention.c_attn_bias->data;
+                auto* c_proj_w = (float*)layers_[i].attention.c_proj_weight->data;
+                auto* c_proj_b = (float*)layers_[i].attention.c_proj_bias->data;
+                for (size_t j = 0; j < (size_t)3 * N_EMBD * N_EMBD; j++) c_attn_w[j] = dist(gen);
+                for (size_t j = 0; j < (size_t)3 * N_EMBD; j++) c_attn_b[j] = dist(gen);
+                for (size_t j = 0; j < (size_t)N_EMBD * N_EMBD; j++) c_proj_w[j] = dist(gen);
+                for (size_t j = 0; j < (size_t)N_EMBD; j++) c_proj_b[j] = dist(gen);
+
+                auto* ln2g = (float*)layers_[i].ln2.gamma->data;
+                auto* ln2b = (float*)layers_[i].ln2.beta->data;
+                for (int j = 0; j < N_EMBD; j++) { ln2g[j] = (j == 0) ? 1.0f : 0.0f; ln2b[j] = 0.0f; }
+
+                auto* fc_w = (float*)layers_[i].ffn.c_fc_weight->data;
+                auto* fc_b = (float*)layers_[i].ffn.c_fc_bias->data;
+                auto* proj_w = (float*)layers_[i].ffn.c_proj_weight->data;
+                auto* proj_b = (float*)layers_[i].ffn.c_proj_bias->data;
+                for (size_t j = 0; j < (size_t)N_FFN * N_EMBD; j++) fc_w[j] = dist(gen);
+                for (size_t j = 0; j < (size_t)N_FFN; j++) fc_b[j] = dist(gen);
+                for (size_t j = 0; j < (size_t)N_EMBD * N_FFN; j++) proj_w[j] = dist(gen);
+                for (size_t j = 0; j < (size_t)N_EMBD; j++) proj_b[j] = dist(gen);
+            }
+
+            float* ln_fg = (float*)ln_f_.gamma->data;
+            float* ln_fb = (float*)ln_f_.beta->data;
+            for (int j = 0; j < N_EMBD; j++) { ln_fg[j] = (j == 0) ? 1.0f : 0.0f; ln_fb[j] = 0.0f; }
+        }
+
+        fclose(gguf.fp);
+        std::cout << "GGUF model loaded successfully" << std::endl;
+        return true;
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading GGUF: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// Helper to extract layer index from tensor name like "model.h.0.attn.c_attn.weight"
+static size_t extract_layer_idx(const std::string& name) {
+    // Find .h. pattern
+    size_t h_pos = name.find(".h.");
+    if (h_pos != std::string::npos) {
+        size_t start = h_pos + 3;
+        size_t end = name.find('.', start);
+        if (end != std::string::npos) {
+            return std::stoi(name.substr(start, end - start));
+        }
+    }
+    return 0;
+}
+
+// FP16 to FP32 conversion
+static float fp16_to_fp32(uint16_t f16) {
+    unsigned int sign = (f16 >> 15) & 0x1;
+    unsigned int exp = (f16 >> 10) & 0x1f;
+    unsigned int mant = f16 & 0x3ff;
+
+    if (exp == 0) {
+        if (mant == 0) return sign ? -0.0f : 0.0f;
+        else return sign ? -pow(2, -14) * (mant / 1024.0f) : pow(2, -14) * (mant / 1024.0f);
+    } else if (exp == 31) {
+        if (mant == 0) return sign ? -INFINITY : INFINITY;
+        else return NAN;
     }
 
-    // Final layer norm
-    float* ln_fg = (float*)ln_f_.gamma->data;
-    float* ln_fb = (float*)ln_f_.beta->data;
-    for (int j = 0; j < N_EMBD; j++) {
-        ln_fg[j] = (j == 0) ? 1.0f : 0.0f;
-        ln_fb[j] = 0.0f;
-    }
-
-    std::cout << "Model initialized with random weights (GGUF loading simplified)" << std::endl;
-    return true;
+    int32_t e = exp - 15;
+    float m = 1.0f + mant / 1024.0f;
+    return sign ? -pow(2, e) * m : pow(2, e) * m;
 }
 
 bool GPT2Model::load_ggml_weights(const std::string& path) {
@@ -335,15 +523,24 @@ std::vector<float> GPT2Model::forward(
     // Compute
     compute();
 
-    // Return logits - copy from logits_data_ buffer
-    // Note: In a real implementation, we'd extract logits from the computed tensor
-    // For now, initialize with zeros
+    // Extract logits from computed tensor
+    // Get logits for the last position only
     std::vector<float> logits(VOCAB_SIZE, 0.0f);
 
-    // If we have computed logits in logits_data_, copy them
-    if (logits_data_ && logits_size_ == VOCAB_SIZE) {
-        memcpy(logits.data(), logits_data_, VOCAB_SIZE * sizeof(float));
+    if (logits_tensor_) {
+        // logits_tensor_ is (seq_len, VOCAB_SIZE)
+        // We want the last row, which is at index seq_len - 1
+        int seq_len = input_ids.size();
+        int last_idx = (seq_len - 1) * VOCAB_SIZE;
+
+        // Copy the last row of logits
+        // First get the pointer to logits data
+        const float* logits_data = (const float*)logits_tensor_->data;
+        for (int i = 0; i < VOCAB_SIZE; i++) {
+            logits[i] = logits_data[last_idx + i];
+        }
     }
+
     return logits;
 }
 
@@ -401,7 +598,9 @@ void GPT2Model::build_graph(
 
     // Pass through transformer layers
     for (int i = 0; i < N_LAYERS; i++) {
-        h = layers_[i].forward(ctx_, &gf_, h, position + i, use_cache);
+        // position is the sequence position of the FIRST token in input_ids
+        // When use_cache=true and seq_len=1 (single new token), position is that token's position
+        h = layers_[i].forward(ctx_, &gf_, h, position, use_cache);
         ggml_build_forward_expand(&gf_, h);
     }
 
@@ -412,33 +611,81 @@ void GPT2Model::build_graph(
     // LM head: h_norm @ lm_head^T
     // lm_head is (VOCAB_SIZE, N_EMBD), we need (N_EMBD, VOCAB_SIZE)
     // Result: (seq_len, VOCAB_SIZE)
-    ggml_tensor* logits = ggml_mul_mat(ctx_, h_norm, lm_head_);
-    ggml_build_forward_expand(&gf_, logits);
+    logits_tensor_ = ggml_mul_mat(ctx_, h_norm, lm_head_);
+    ggml_build_forward_expand(&gf_, logits_tensor_);
 }
 
 void GPT2Model::compute() {
-    // Compute the built graph
-    // ggml_graph_compute_with_ctx(ctx, cgraph, n_threads)
-    // n_threads: -1 = all threads, 0 = single thread, >0 = specific count
-    ggml_graph_compute_with_ctx(ctx_, &gf_, -1);
+    // GGML 0.10+ backend API: use best available backend (GPU if available)
+    ggml_backend_t backend = nullptr;
+
+    // Try CUDA backend first
+    if (use_gpu_) {
+        // Try ggml_backend_init_by_name("cuda") first
+        backend = ggml_backend_init_by_name("cuda");
+        if (!backend) {
+            // Fall back to GPU type
+            backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, NULL);
+        }
+    }
+
+    // Fall back to CPU if GPU not available or disabled
+    if (!backend) {
+        if (use_gpu_) {
+            std::cerr << "GPU backend not available, falling back to CPU" << std::endl;
+        }
+        backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
+    }
+
+    if (!backend) {
+        std::cerr << "Failed to initialize GGML backend" << std::endl;
+        return;
+    }
+
+    ggml_backend_graph_compute(backend, &gf_);
+    ggml_backend_free(backend);
 }
 
 std::vector<int> GPT2Model::generate(
-    const std::string& prompt,
+    const std::vector<int>& prompt_tokens,
     int max_new_tokens,
     float temperature,
     int top_k
 ) {
-    std::vector<int> tokens;
+    std::vector<int> tokens = prompt_tokens;
 
-    // For now, just return EOS (placeholder for actual generation)
-    // Real implementation would:
-    // 1. Tokenize prompt
-    // 2. Run forward pass
-    // 3. Sample next token
-    // 4. Append to tokens and repeat
+    // First forward pass: process the full prompt to populate KV cache
+    // use_cache=true means we'll cache K,V for each layer
+    std::cout << "Processing prompt (" << tokens.size() << " tokens)..." << std::endl;
+    forward(tokens, 0, true);  // position=0 for the first token
 
-    tokens.push_back(EOS_TOKEN);
+    // Subsequent passes: only process the single new token
+    // KV cache will be used to attend to all previous tokens
+    while ((int)tokens.size() < (int)prompt_tokens.size() + max_new_tokens) {
+        int current_position = tokens.size() - 1;  // Position of the last token in sequence
+
+        // Create single-element vector with just the new token
+        std::vector<int> single_token = {tokens.back()};
+
+        // Forward pass with single token, use_cache=true to use & update KV cache
+        std::vector<float> logits = forward(single_token, current_position, true);
+
+        // Sample next token (use logits directly - they correspond to the single token)
+        int next_token = sample(logits, temperature, top_k);
+
+        // Check for EOS
+        if (next_token == EOS_TOKEN) {
+            break;
+        }
+
+        // Append to sequence
+        tokens.push_back(next_token);
+
+        // Print progress
+        std::cout << "." << std::flush;
+    }
+
+    std::cout << std::endl;
     return tokens;
 }
 

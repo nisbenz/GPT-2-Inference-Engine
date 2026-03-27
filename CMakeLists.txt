@@ -26,15 +26,19 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src
 )
 
-# Libraries: In GGML 0.10+, the main ggml.so is a thin loader.
-# The actual GGML functions are compiled into the backend libraries.
-# Link directly to the actual library files, not the loader.
+# Libraries: In GGML 0.10+, the ggml library contains backend registration and device enumeration
+# The libggml.so links to ggml-base and backend libraries
+set(GGML_LIBRARY "${GGML_BUILD_DIR}/src/libggml.so")
 set(GGML_CUDA_LIBRARY "${GGML_BUILD_DIR}/src/ggml-cuda/libggml-cuda.so")
 set(GGML_CPU_LIBRARY "${GGML_BUILD_DIR}/src/ggml-cpu/libggml-cpu.so")
 set(GGML_BASE_LIBRARY "${GGML_BUILD_DIR}/src/libggml-base.so")
 
 # Check which libraries actually exist
 set(GGML_LIBRARIES "")
+if(EXISTS "${GGML_LIBRARY}")
+    list(APPEND GGML_LIBRARIES "${GGML_LIBRARY}")
+    message(STATUS "Using GGML: ${GGML_LIBRARY}")
+endif()
 if(EXISTS "${GGML_CUDA_LIBRARY}")
     list(APPEND GGML_LIBRARIES "${GGML_CUDA_LIBRARY}")
     message(STATUS "Using GGML CUDA: ${GGML_CUDA_LIBRARY}")

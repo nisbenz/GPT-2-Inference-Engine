@@ -33,11 +33,22 @@ public:
     // Generate tokens autoregressively
     // Starts with prompt tokens, generates up to max_new_tokens
     std::vector<int> generate(
-        const std::string& prompt,
+        const std::vector<int>& prompt_tokens,
         int max_new_tokens = 100,
         float temperature = 1.0f,
         int top_k = 50
     );
+
+    // Tokenize string to token IDs
+    std::vector<int> tokenize(const std::string& text) { return tokenizer_.encode(text); }
+
+    // Decode token IDs to string
+    std::string decode(const std::vector<int>& tokens) { return tokenizer_.decode(tokens); }
+
+    // Load tokenizer from vocab and merges files
+    bool load_tokenizer(const std::string& vocab_path, const std::string& merges_path) {
+        return tokenizer_.load(vocab_path, merges_path);
+    }
 
     // Get logits for next token prediction at position
     // Must be called after forward()
@@ -82,6 +93,9 @@ private:
     // Current logits
     float* logits_data_;
     int logits_size_;
+
+    // Computed logits tensor (for extraction after compute)
+    ggml_tensor* logits_tensor_;
 
     // Tokenizer
     GPT2Tokenizer tokenizer_;
