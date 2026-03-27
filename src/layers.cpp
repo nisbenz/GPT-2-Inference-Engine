@@ -154,6 +154,9 @@ ggml_tensor* Attention::forward(
     k = ggml_reshape_3d(ctx, k, seq_len, n_heads, head_dim);
     v = ggml_reshape_3d(ctx, v, seq_len, n_heads, head_dim);
 
+    printf("[Debug Attn] after reshape_3d q: ne[0]=%lu, ne[1]=%lu, ne[2]=%lu, n_dims=%d\n",
+           (unsigned long)q->ne[0], (unsigned long)q->ne[1], (unsigned long)q->ne[2], q->n_dims);
+
     // Handle KV cache storage and retrieval
     int total_kv_len = seq_len;
 
@@ -252,65 +255,49 @@ ggml_tensor* Attention::forward(
     // = (seq_len * n_heads, n_heads * total_kv_len)
     printf("[Debug Attn] seq_len=%d, n_heads=%d, head_dim=%d, total_kv_len=%d, position=%d\n",
            seq_len, n_heads, head_dim, total_kv_len, position);
-    printf("[Debug Attn] q_2d: ne[0]=%lu, ne[1]=%lu\n", (unsigned long)q_2d->ne[0], (unsigned long)q_2d->ne[1]);
-    printf("[Debug Attn] k_mat: ne[0]=%lu, ne[1]=%lu\n", (unsigned long)k_mat->ne[0], (unsigned long)k_mat->ne[1]);
+    printf("[Debug Attn] q_2d: ne[0]=%lu, ne[1]=%lu, n_dims=%d\n", (unsigned long)q_2d->ne[0], (unsigned long)q_2d->ne[1], q_2d->n_dims);
+    printf("[Debug Attn] k_mat: ne[0]=%lu, ne[1]=%lu, n_dims=%d\n", (unsigned long)k_mat->ne[0], (unsigned long)k_mat->ne[1], k_mat->n_dims);
     ggml_tensor* scores = ggml_mul_mat(ctx, q_2d, k_mat);
+    printf("[Debug Attn] SCORES after mul_mat: ne[0]=%lu, ne[1]=%lu, ne[2]=%lu, n_dims=%d\n",
+           (unsigned long)scores->ne[0], (unsigned long)scores->ne[1],
+           (unsigned long)scores->ne[2], scores->n_dims);
     scores = ggml_scale(ctx, scores, 1.0f / std::sqrt((float)head_dim));
 
     // Apply causal mask: for token i, can only attend to positions 0..i in the full sequence
-    // For seq_len tokens starting at position, we need a mask that allows each token to attend
-    // to positions up to (position + i)
     if (seq_len > 1 || (use_cache && position > 0)) {
-        // Create mask as 3D tensor (n_heads, seq_len, total_kv_len) for cleaner broadcasting
-        // Then reshape to (seq_len * n_heads, total_kv_len) - will broadcast across n_heads in scores
-        ggml_tensor* mask_3d = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, seq_len, total_kv_len, n_heads);
-        float* mask_data = (float*)mask_3d->data;
+        // scores shape: (seq_len * n_heads, n_heads * total_kv_len)
+        // scores[row=h*seq_len+i, col=h*total_kv_len+j] represents head h, token i attending to key position j
+        // We want to mask where j > position + i (future positions)
+        ggml_tensor* mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
+                                               seq_len * n_heads, n_heads * total_kv_len);
+        float* mask_data = (float*)mask->data;
 
-        // mask_3d is stored as (seq_len, total_kv_len, n_heads) in memory
-        // For head h, token i, key position j: mask[j, i, h] (GGML's column-major)
+        // GGML uses column-major memory layout
+        // mask[col * n_rows + row] = value
         for (int h = 0; h < n_heads; h++) {
             for (int i = 0; i < seq_len; i++) {
                 int token_pos = position + i;  // absolute position of token i
-                int plane_size = seq_len * n_heads;
+                int row = h * seq_len + i;
                 for (int j = 0; j < total_kv_len; j++) {
-                    // GGML column-major: index = j*plane_size + i*n_heads + h
-                    size_t idx = j * plane_size + i * n_heads + h;
+                    int col = h * total_kv_len + j;
+                    // column-major: index = row + col * n_rows
+                    size_t idx = row + col * (seq_len * n_heads);
                     mask_data[idx] = (j > token_pos) ? -10000.0f : 0.0f;
                 }
             }
         }
 
-        // Reshape mask to (seq_len, n_heads, total_kv_len) then broadcast to scores shape
-        ggml_tensor* mask_reshaped = ggml_reshape_3d(ctx, mask_3d, seq_len, n_heads, total_kv_len);
-        // scores is (seq_len * n_heads, n_heads * total_kv_len)
-        // We need mask to be broadcastable - reshape to (seq_len, n_heads, total_kv_len)
-        // which broadcasts to (seq_len, n_heads, total_kv_len) repeated across n_heads
-        // Actually scores is flat 2D, so let's use 2D mask directly
-
-        // scores row structure: row r = h*seq_len + i represents head h, token i
-        // scores col structure: col c = h*total_kv_len + j represents head h, key position j
-        // For row (h,i), we need mask values where j > position+i is -10000
-        ggml_tensor* mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
-                                               seq_len * n_heads, n_heads * total_kv_len);
-        float* mask2d = (float*)mask->data;
-
-        for (int r = 0; r < seq_len * n_heads; r++) {
-            int h = r / seq_len;  // head index
-            int i = r % seq_len;  // token within sequence
-            int token_pos = position + i;
-            int col_base = h * total_kv_len;
-            for (int j = 0; j < total_kv_len; j++) {
-                int c = col_base + j;
-                size_t idx = r * (n_heads * total_kv_len) + c;
-                mask2d[idx] = (j > token_pos) ? -10000.0f : 0.0f;
-            }
-        }
-
-        printf("[Debug Attn] mask shape: ne[0]=%lu, ne[1]=%lu\n", (unsigned long)mask->ne[0], (unsigned long)mask->ne[1]);
+        printf("[Debug Attn] mask: ne[0]=%lu, ne[1]=%lu, n_dims=%d\n",
+               (unsigned long)mask->ne[0], (unsigned long)mask->ne[1], mask->n_dims);
+        printf("[Debug Attn] scores pre-add: ne[0]=%lu, ne[1]=%lu, n_dims=%d\n",
+               (unsigned long)scores->ne[0], (unsigned long)scores->ne[1], scores->n_dims);
         scores = ggml_add(ctx, scores, mask);
     }
 
-    printf("[Debug Attn] scores ne[0]=%lu ne[1]=%lu\n", (unsigned long)scores->ne[0], (unsigned long)scores->ne[1]);
+    printf("[Debug Attn] scores ne[0]=%lu ne[1]=%lu ne[2]=%lu ne[3]=%lu\n",
+           (unsigned long)scores->ne[0], (unsigned long)scores->ne[1],
+           (unsigned long)scores->ne[2], (unsigned long)scores->ne[3]);
+    printf("[Debug Attn] scores n_dims=%d\n", scores->n_dims);
     fflush(stdout);
 
     // Softmax over the key dimension
