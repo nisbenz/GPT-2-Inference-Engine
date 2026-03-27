@@ -44,26 +44,126 @@ bool GPT2Tokenizer::load(const std::string& vocab_path, const std::string& merge
     std::string line;
     while (std::getline(vocab_file, line)) {
         // Expected format: "token": id
-        size_t colon_pos = line.find(':');
+        size_t colon_pos = line.rfind(':');
         if (colon_pos == std::string::npos) continue;
 
-        // Extract token string (between quotes)
+        // Extract token string (between first and last quote before colon)
         size_t token_start = line.find('"');
-        size_t token_end = line.rfind('"');
-        if (token_start == std::string::npos || token_end == std::string::npos) continue;
+        if (token_start == std::string::npos) continue;
         token_start++; // Skip opening quote
 
-        std::string token = line.substr(token_start, token_end - token_start);
-        std::string id_str = line.substr(colon_pos + 1);
-        int id = std::stoi(id_str);
-
-        // Convert GPT-2 special bytes (Ġ = 0xC4 0xA0 = 256+32=288 in GPT-2)
-        // These are GPT-2's way of representing bytes as Unicode chars
-        if (token.size() >= 2 && (unsigned char)token[0] == 0xC4 && (unsigned char)token[1] == 0xA0) {
-            // This represents byte 32 (space) - we already have it
-            continue;
+        // Find the closing quote (the one right before the colon)
+        // Handle escaped quotes inside the token
+        size_t token_end = std::string::npos;
+        for (size_t i = token_start; i < line.size(); i++) {
+            if (line[i] == '\\') { i++; continue; } // skip escaped char
+            if (line[i] == '"') { token_end = i; break; }
         }
+        if (token_end == std::string::npos) continue;
+
+        std::string token = line.substr(token_start, token_end - token_start);
+
+        // Handle JSON escape sequences
+        std::string unescaped;
+        for (size_t i = 0; i < token.size(); i++) {
+            if (token[i] == '\\' && i + 1 < token.size()) {
+                switch (token[i + 1]) {
+                    case 'n': unescaped += '\n'; i++; break;
+                    case 't': unescaped += '\t'; i++; break;
+                    case 'r': unescaped += '\r'; i++; break;
+                    case '"': unescaped += '"'; i++; break;
+                    case '\\': unescaped += '\\'; i++; break;
+                    case 'u': {
+                        // Unicode escape: \uXXXX
+                        if (i + 5 < token.size()) {
+                            std::string hex = token.substr(i + 2, 4);
+                            int cp = std::stoi(hex, nullptr, 16);
+                            // Encode as UTF-8
+                            if (cp < 0x80) {
+                                unescaped += (char)cp;
+                            } else if (cp < 0x800) {
+                                unescaped += (char)(0xC0 | (cp >> 6));
+                                unescaped += (char)(0x80 | (cp & 0x3F));
+                            } else {
+                                unescaped += (char)(0xE0 | (cp >> 12));
+                                unescaped += (char)(0x80 | ((cp >> 6) & 0x3F));
+                                unescaped += (char)(0x80 | (cp & 0x3F));
+                            }
+                            i += 5;
+                        }
+                        break;
+                    }
+                    default: unescaped += token[i]; break;
+                }
+            } else {
+                unescaped += token[i];
+            }
+        }
+        token = unescaped;
+
+        // Parse the ID after the colon
+        std::string id_str = line.substr(colon_pos + 1);
+        // Strip whitespace and trailing comma/brace
+        size_t id_start = id_str.find_first_of("0123456789");
+        if (id_start == std::string::npos) continue;
+        size_t id_end = id_str.find_first_not_of("0123456789", id_start);
+        int id = std::stoi(id_str.substr(id_start, id_end - id_start));
+
+        // GPT-2 uses a byte encoder: Unicode codepoints 256-288 map to bytes 0-32,
+        // codepoints 289-322 map to bytes 127-160, etc.
+        // We need to decode the token's UTF-8 codepoints through this byte table.
+        // For simplicity, decode each UTF-8 codepoint and map back to the original byte.
+        std::string decoded;
+        for (size_t i = 0; i < token.size(); ) {
+            unsigned char c = (unsigned char)token[i];
+            int cp = 0;
+            int nbytes = 1;
+            if (c < 0x80) {
+                cp = c; nbytes = 1;
+            } else if ((c & 0xE0) == 0xC0) {
+                cp = c & 0x1F;
+                if (i + 1 < token.size()) cp = (cp << 6) | ((unsigned char)token[i+1] & 0x3F);
+                nbytes = 2;
+            } else if ((c & 0xF0) == 0xE0) {
+                cp = c & 0x0F;
+                if (i + 1 < token.size()) cp = (cp << 6) | ((unsigned char)token[i+1] & 0x3F);
+                if (i + 2 < token.size()) cp = (cp << 6) | ((unsigned char)token[i+2] & 0x3F);
+                nbytes = 3;
+            } else {
+                cp = c & 0x07;
+                if (i + 1 < token.size()) cp = (cp << 6) | ((unsigned char)token[i+1] & 0x3F);
+                if (i + 2 < token.size()) cp = (cp << 6) | ((unsigned char)token[i+2] & 0x3F);
+                if (i + 3 < token.size()) cp = (cp << 6) | ((unsigned char)token[i+3] & 0x3F);
+                nbytes = 4;
+            }
+            i += nbytes;
+
+            
+            if (cp >= 0 && cp <= 255) {
+                // Direct ASCII range or high byte that maps to itself
+                decoded += (char)cp;
+            } else if (cp >= 256 && cp <= 511) {
+                // Shifted byte: original byte = cp - 256
+                // GPT-2 maps bytes {0-32, 127-160, 173} to codepoints {256-288, 289-322, 323}
+                decoded += (char)(cp - 256);
+            } else {
+                // Other Unicode - just encode as UTF-8
+                if (cp < 0x80) decoded += (char)cp;
+                else if (cp < 0x800) {
+                    decoded += (char)(0xC0 | (cp >> 6));
+                    decoded += (char)(0x80 | (cp & 0x3F));
+                } else {
+                    decoded += (char)(0xE0 | (cp >> 12));
+                    decoded += (char)(0x80 | ((cp >> 6) & 0x3F));
+                    decoded += (char)(0x80 | (cp & 0x3F));
+                }
+            }
+        }
+
+        id_to_token_[id] = decoded;
     }
+
+    std::cout << "Loaded " << id_to_token_.size() << " vocab entries" << std::endl;
 
     // Parse merges file
     std::ifstream merges_file(merges_path);
@@ -293,15 +393,14 @@ std::string GPT2Tokenizer::decode(const std::vector<int>& tokens) {
     std::string result;
 
     for (int token : tokens) {
-        // Convert token ID back to bytes
-        if (token < 256) {
-            // Raw byte
+        auto it = id_to_token_.find(token);
+        if (it != id_to_token_.end()) {
+            result += it->second;
+        } else if (token < 256) {
+            // Fallback: raw byte
             result += (char)token;
-        } else if (token >= 256 && token < 432) {
-            // GPT-2 encoded byte
-            result += (char)(token - 256);
         }
-        // Note: merged tokens would need reverse lookup
+        // Skip unknown tokens silently
     }
 
     return result;
