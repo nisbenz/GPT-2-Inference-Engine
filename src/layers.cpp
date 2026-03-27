@@ -154,8 +154,8 @@ ggml_tensor* Attention::forward(
     k = ggml_reshape_3d(ctx, k, seq_len, n_heads, head_dim);
     v = ggml_reshape_3d(ctx, v, seq_len, n_heads, head_dim);
 
-    printf("[Debug Attn] after reshape_3d q: ne[0]=%lu, ne[1]=%lu, ne[2]=%lu, n_dims=%d\n",
-           (unsigned long)q->ne[0], (unsigned long)q->ne[1], (unsigned long)q->ne[2], q->n_dims);
+    printf("[Debug Attn] after reshape_3d q: ne[0]=%lu, ne[1]=%lu, ne[2]=%lu\n",
+           (unsigned long)q->ne[0], (unsigned long)q->ne[1], (unsigned long)q->ne[2]);
 
     // Handle KV cache storage and retrieval
     int total_kv_len = seq_len;
