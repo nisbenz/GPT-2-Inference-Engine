@@ -26,7 +26,7 @@ add_executable(gpt2 ${SOURCES})
 # Link GGML (use cmake exported targets from GGML build)
 target_link_libraries(gpt2
     ggml
-    ggml_cuda
+    ggml_cublas
     cublas
     pthread
     m
