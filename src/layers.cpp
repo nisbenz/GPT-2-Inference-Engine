@@ -206,8 +206,8 @@ ggml_tensor* Attention::forward(
 
             ggml_tensor* v_cached = ggml_view_3d(ctx, v_cache,
                 n_heads, position, head_dim,
-                head_dim * context_length * sizeof(float),
-                context_length * sizeof(float),
+                head_dim * GPT2Config::context_length * sizeof(float),
+                GPT2Config::context_length * sizeof(float),
                 sizeof(float));
 
             v_cached = ggml_reshape_3d(ctx, v_cached, n_heads, position, head_dim);
