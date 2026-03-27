@@ -129,9 +129,11 @@ ggml_tensor* Attention::forward(
     V = ggml_permute(ctx, V, 0, 2, 1, 3);
 
     // ---- Attention scores ----
+    // ggml_mul_mat requires non-transposed first arg, so make K contiguous
     // ggml_mul_mat(K, Q) = K^T @ Q, batched over ne[2]=n_heads
     // Both ne[0]=head_dim; result: ne[0]=seq_len, ne[1]=seq_len, ne[2]=n_heads
-    ggml_tensor* scores = ggml_mul_mat(ctx, K, Q);
+    ggml_tensor* K_cont = ggml_cont(ctx, K);
+    ggml_tensor* scores = ggml_mul_mat(ctx, K_cont, Q);
     scores = ggml_scale(ctx, scores, 1.0f / std::sqrt((float)head_dim));
 
     // ---- Causal mask ----
@@ -146,7 +148,9 @@ ggml_tensor* Attention::forward(
     // V: ne[0]=head_dim, ne[1]=seq_len, ne[2]=n_heads (after permute, non-contiguous)
     // Need V with ne[0]=seq_len for matmul with attn_weights
     // Permute V: swap ne[0] and ne[1] -> (seq_len, head_dim, n_heads)
-    ggml_tensor* V_t = ggml_permute(ctx, V, 1, 0, 2, 3);
+    // ggml_cont required: double-permute makes nb[0] > nb[1] (transposed),
+    // and ggml_mul_mat asserts !ggml_is_transposed(a)
+    ggml_tensor* V_t = ggml_cont(ctx, ggml_permute(ctx, V, 1, 0, 2, 3));
 
     // ggml_mul_mat(V_t, attn_weights) = V_t^T @ attn_weights
     // V_t ne[0]=seq_len, attn_weights ne[0]=seq_len — match
