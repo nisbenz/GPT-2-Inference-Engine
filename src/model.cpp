@@ -263,17 +263,18 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                 // Check if dimensions are transposed
                 bool needs_transpose = false;
                 if (t.n_dims == 2) {
-                    if (t.dims[0] != (uint64_t)dst->ne[0] && t.dims[1] == (uint64_t)dst->ne[0]) {
+                    // All GPT-2 linear transformations (c_attn, c_proj, c_fc) are HuggingFace Conv1D. 
+                    // Conv1D stores memory as [in_features, out_features] where out_features is contiguous.
+                    // ggml_mul_mat requires in_features to be contiguous. Thus, we MUST transpose them all.
+                    if (t.name.find("blk.") != std::string::npos && 
+                        t.name.find(".weight") != std::string::npos && 
+                        t.name.find("norm") == std::string::npos) {
                         needs_transpose = true;
                     } 
-                    // Square matrices (e.g. 768x768 attn_output) might inherently be transposed if they are Conv1D
-                    else if (t.dims[0] == (uint64_t)dst->ne[0] && t.dims[1] == (uint64_t)dst->ne[1] && t.dims[0] == t.dims[1]) {
-                        if (t.name.find(".weight") != std::string::npos && 
-                            t.name.find("embd") == std::string::npos && 
-                            t.name.find("norm") == std::string::npos) {
-                            needs_transpose = true;
-                        }
-                    }
+                    // Fallback for statically inverted dimensions
+                    else if (t.dims[0] != (uint64_t)dst->ne[0] && t.dims[1] == (uint64_t)dst->ne[0]) {
+                        needs_transpose = true;
+                    } 
                 }
 
                 // [DEBUG] Print dimension mapping for first layer to verify
