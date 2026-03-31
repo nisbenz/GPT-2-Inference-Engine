@@ -482,6 +482,19 @@ std::vector<float> GPT2Model::forward(
         for (int v = 0; v < VOCAB_SIZE; v++) {
             logits[v] = logits_data[(seq_len - 1) * VOCAB_SIZE + v];
         }
+
+        // Debug: print top 5 logits and their tokens
+        std::vector<std::pair<float, int>> top_logits;
+        for (int v = 0; v < VOCAB_SIZE; v++) {
+            top_logits.push_back({logits[v], v});
+        }
+        std::partial_sort(top_logits.begin(), top_logits.begin() + 5, top_logits.end(),
+                         [](const auto& a, const auto& b) { return a.first > b.first; });
+        std::cout << "[DEBUG] Top 5 logits at seq_len=" << seq_len << ": ";
+        for (int i = 0; i < 5; i++) {
+            std::cout << "token=" << top_logits[i].second << "(" << tokenizer_.decode({top_logits[i].second}) << ") logit=" << top_logits[i].first << " ";
+        }
+        std::cout << std::endl;
     }
 
     // Free the temporary context
