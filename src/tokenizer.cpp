@@ -1,4 +1,5 @@
 #include "tokenizer.hpp"
+#include <climits>
 #include <fstream>
 #include <sstream>
 #include <iostream>
