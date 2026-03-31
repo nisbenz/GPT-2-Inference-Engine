@@ -234,6 +234,19 @@ bool GPT2Tokenizer::load(const std::string& vocab_path, const std::string& merge
 
         if (id1 != -1 && id2 != -1) {
             merges_[{id1, id2}] = merge_rank;
+            // Compute the merged string and look up its token ID
+            std::string merged_str = decoded1 + decoded2;
+            // Look up the merged string in id_to_token_ to find its token ID
+            int merged_id = -1;
+            for (const auto& pair : id_to_token_) {
+                if (pair.second == merged_str) {
+                    merged_id = pair.first;
+                    break;
+                }
+            }
+            if (merged_id != -1) {
+                merge_to_token_[{id1, id2}] = merged_id;
+            }
             merge_order_.push_back({id1, id2});
             merge_rank++;
         }
@@ -322,8 +335,12 @@ std::vector<int> GPT2Tokenizer::encode(const std::string& text) {
             // If no valid merge exists, stop merging this chunk
             if (best_pos == -1) break;
 
-            // Perform the merge: replace pair at best_pos with merged token
-            int new_token = merges_[{token_ids[best_pos], token_ids[best_pos + 1]}];
+            // Look up the actual merged token ID
+            std::pair<int, int> pair = {token_ids[best_pos], token_ids[best_pos + 1]};
+            auto merge_it = merge_to_token_.find(pair);
+            if (merge_it == merge_to_token_.end()) break;  // No valid merged token found
+
+            int new_token = merge_it->second;
             token_ids.erase(token_ids.begin() + best_pos);
             token_ids[best_pos] = new_token;
         }

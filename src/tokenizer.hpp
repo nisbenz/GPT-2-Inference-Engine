@@ -46,7 +46,8 @@ private:
     // Byte pair encoding data
     std::unordered_map<int, int> byte_to_id_;       // byte -> token id
     std::unordered_map<int, std::string> id_to_token_; // token id -> decoded string
-    std::unordered_map<std::pair<int, int>, int, pair_hash> merges_;  // (b1, b2) -> new_id
+    std::unordered_map<std::pair<int, int>, int, pair_hash> merges_;  // (b1, b2) -> merge_rank
+    std::unordered_map<std::pair<int, int>, int, pair_hash> merge_to_token_;  // (b1, b2) -> merged_token_id
     std::vector<std::pair<int, int>> merge_order_;  // Ordered list of merges
 
     // Regex for GPT-2 tokenization
