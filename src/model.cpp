@@ -257,19 +257,17 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
 
             if (dst) {
                 // Calculate expected size
-                size_t expected_nbytes = ggml_nbytes(dst);
-                size_t actual_nbytes = gguf_tensor_nbytes(t);
-
-                // The conversion scripts pre-transpose Conv1D to Linear layout internally!
-                // So the GGUF t.dims directly and correctly match dst_ne dimensions.
+                // Allow generic transpose if dimensions are inverted from expectation
                 bool needs_transpose = false;
-
-                // [DEBUG] Print dimension mapping for first layer to verify
-                if (t.name.find("blk.0.") != std::string::npos) {
-                    std::cout << "[DEBUG] Tensor " << t.name << " file_dims=[" << t.dims[0] << "," << t.dims[1] 
-                              << "] dst_ne=[" << dst->ne[0] << "," << dst->ne[1] 
-                              << "] transposed=" << (needs_transpose ? "YES" : "NO") << std::endl;
+                if (t.n_dims == 2 && t.dims[0] != (uint64_t)dst->ne[0] && t.dims[1] == (uint64_t)dst->ne[0]) {
+                    needs_transpose = true;
                 }
+
+                // [DEBUG] Print dimension mapping for ALL layers to verify global corruption
+                std::cout << "[DEBUG] Tensor " << t.name << " file_dims=[" << t.dims[0] << "," << t.dims[1] 
+                          << "] dst_ne=[" << dst->ne[0] << "," << dst->ne[1] 
+                          << "] transposed=" << (needs_transpose ? "YES" : "NO") << std::endl;
+
 
                 if (expected_nbytes == actual_nbytes || t.type == GGUF_TID_Q4_K || t.type == GGUF_TID_Q8_0_ALT || t.type == GGUF_TID_BF16 || t.type == GGUF_TID_F16) {
                     
@@ -329,12 +327,13 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                     if (read_success) {
                         auto* dst_ptr = (float*)dst->data;
                         if (needs_transpose) {
-                            // Dead fallback path
-                            int cols_file = (int)t.dims[0];
-                            int rows_file = (int)t.dims[1];
-                            for (int r = 0; r < rows_file; r++) {
-                                for (int c = 0; c < cols_file; c++) {
-                                    dst_ptr[c * rows_file + r] = buffer_f[r * cols_file + c];
+                            // Genuine transpose: swap the rows and columns
+                            int in_features = (int)dst->ne[0];
+                            int out_features = (int)dst->ne[1];
+                            for (int r = 0; r < out_features; r++) {
+                                for (int c = 0; c < in_features; c++) {
+                                    // t.dims[0] is out_features, t.dims[1] is in_features
+                                    dst_ptr[r * in_features + c] = buffer_f[c * out_features + r];
                                 }
                             }
                         } else {
@@ -481,41 +480,24 @@ void GPT2Model::build_graph(
 
     int seq_len = input_ids.size();
 
-    // Build embeddings by selecting rows from wte
-    ggml_tensor* input_embd = nullptr;
-    for (int i = 0; i < seq_len; i++) {
-        // Get embedding for token input_ids[i]
-        ggml_tensor* row = ggml_view_2d(ctx0, wte_, N_EMBD, 1,
-                                        N_EMBD * sizeof(float),
-                                        input_ids[i] * N_EMBD * sizeof(float));
-        if (i == 0) {
-            input_embd = row;
-        } else {
-            input_embd = ggml_concat(ctx0, input_embd, row, 0);
-        }
-    }
-    // input_embd: (seq_len * N_EMBD, 1) = (12288, 1) for seq_len=16
-    // Reshape to ne[0]=N_EMBD, ne[1]=seq_len (standard ggml convention)
-    input_embd = ggml_reshape_2d(ctx0, input_embd, N_EMBD, seq_len);
+    // Build tokens tensor for fast row extraction
+    ggml_tensor* tokens_tensor = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, seq_len);
+    std::memcpy(tokens_tensor->data, input_ids.data(), seq_len * sizeof(int32_t));
 
-    // Add positional embeddings
-    ggml_tensor* pos_embd = nullptr;
-    for (int i = 0; i < seq_len; i++) {
-        int pos = position + i;
-        if (pos >= CONTEXT_LENGTH) pos = CONTEXT_LENGTH - 1;  // Clip to max
+    // Get input embeddings: perfectly mapped to [N_EMBD, seq_len]
+    ggml_tensor* input_embd = ggml_get_rows(ctx0, wte_, tokens_tensor);
 
-        ggml_tensor* pos_row = ggml_view_2d(ctx0, wpe_, N_EMBD, 1,
-                                            N_EMBD * sizeof(float),
-                                            pos * N_EMBD * sizeof(float));
-        if (i == 0) {
-            pos_embd = pos_row;
-        } else {
-            pos_embd = ggml_concat(ctx0, pos_embd, pos_row, 0);
-        }
+    // Build positional indices tensor
+    std::vector<int32_t> pos_ids(seq_len);
+    for (int i = 0; i < seq_len; i++) {
+        int p = position + i;
+        pos_ids[i] = (p >= CONTEXT_LENGTH) ? (CONTEXT_LENGTH - 1) : p;
     }
-    // pos_embd: (seq_len * N_EMBD, 1) = (12288, 1)
-    pos_embd = ggml_reshape_2d(ctx0, pos_embd, N_EMBD, seq_len);
-    // pos_embd: ne[0]=N_EMBD, ne[1]=seq_len
+    ggml_tensor* pos_tensor = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, seq_len);
+    std::memcpy(pos_tensor->data, pos_ids.data(), seq_len * sizeof(int32_t));
+
+    // Get positional embeddings: properly maps to [N_EMBD, seq_len]
+    ggml_tensor* pos_embd = ggml_get_rows(ctx0, wpe_, pos_tensor);
 
     ggml_tensor* h = ggml_add(ctx0, input_embd, pos_embd);
     // h: ne[0]=N_EMBD, ne[1]=seq_len

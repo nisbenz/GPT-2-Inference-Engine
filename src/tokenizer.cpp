@@ -303,6 +303,15 @@ std::vector<int> GPT2Tokenizer::encode(const std::string& text) {
                 i++;
             }
         }
+        
+        // [DEBUG] Add log for exact raw bytes array
+        std::cout << "[DEBUG] Chunk '" << chunk << "' bytes: [";
+        for (size_t b_idx = 0; b_idx < bytes.size(); b_idx++) {
+            std::cout << (int)bytes[b_idx];
+            if (b_idx < bytes.size() - 1) std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+
 
         // Step 3: Convert bytes to token IDs (base tokens 0-255)
         // In GPT-2's byte-level BPE, bytes 0-255 map directly to token IDs 0-255
@@ -314,9 +323,19 @@ std::vector<int> GPT2Tokenizer::encode(const std::string& text) {
                 token_ids.push_back(it_id->second);
             } else {
                 // Fallback: use byte value directly
+                std::cerr << "[WARNING] Unmapped byte: " << (int)b << std::endl;
                 token_ids.push_back((int)b);
             }
         }
+        
+        // [DEBUG] Log base mapped IDs before merges
+        std::cout << "[DEBUG] Pre-merge token IDs: [";
+        for (size_t id_idx = 0; id_idx < token_ids.size(); id_idx++) {
+            std::cout << token_ids[id_idx];
+            if (id_idx < token_ids.size() - 1) std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+
 
         // Step 4: Apply BPE merges iteratively
         // Standard BPE: repeatedly find the highest-priority adjacent pair and merge
@@ -349,6 +368,14 @@ std::vector<int> GPT2Tokenizer::encode(const std::string& text) {
             token_ids[best_pos] = new_token;
         }
 
+        // [DEBUG] Log final IDs after merges
+        std::cout << "[DEBUG] Post-merge token IDs: [";
+        for (size_t id_idx = 0; id_idx < token_ids.size(); id_idx++) {
+            std::cout << token_ids[id_idx];
+            if (id_idx < token_ids.size() - 1) std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+
         // Append the final token IDs for this chunk
         result.insert(result.end(), token_ids.begin(), token_ids.end());
 
@@ -371,6 +398,9 @@ std::string GPT2Tokenizer::decode(const std::vector<int>& tokens) {
         }
         // Skip unknown tokens silently
     }
+    
+    // [DEBUG] Print detokenization output
+    std::cout << "[DEBUG] Detokenized string: '" << result << "'" << std::endl;
 
     return result;
 }
