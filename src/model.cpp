@@ -262,9 +262,25 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
 
                 // Check if dimensions are transposed
                 bool needs_transpose = false;
-                if (t.n_dims == 2 && t.dims[0] != (uint64_t)dst->ne[0] && t.dims[1] == (uint64_t)dst->ne[0]) {
-                    needs_transpose = true;
-                    // Note: actual_nbytes mathematically equals expected_nbytes since in*out == out*in
+                if (t.n_dims == 2) {
+                    if (t.dims[0] != (uint64_t)dst->ne[0] && t.dims[1] == (uint64_t)dst->ne[0]) {
+                        needs_transpose = true;
+                    } 
+                    // Square matrices (e.g. 768x768 attn_output) might inherently be transposed if they are Conv1D
+                    else if (t.dims[0] == (uint64_t)dst->ne[0] && t.dims[1] == (uint64_t)dst->ne[1] && t.dims[0] == t.dims[1]) {
+                        if (t.name.find(".weight") != std::string::npos && 
+                            t.name.find("embd") == std::string::npos && 
+                            t.name.find("norm") == std::string::npos) {
+                            needs_transpose = true;
+                        }
+                    }
+                }
+
+                // [DEBUG] Print dimension mapping for first layer to verify
+                if (t.name.find("blk.0.") != std::string::npos) {
+                    std::cout << "[DEBUG] Tensor " << t.name << " file_dims=[" << t.dims[0] << "," << t.dims[1] 
+                              << "] dst_ne=[" << dst->ne[0] << "," << dst->ne[1] 
+                              << "] transposed=" << (needs_transpose ? "YES" : "NO") << std::endl;
                 }
 
                 if (expected_nbytes == actual_nbytes || t.type == GGUF_TID_Q4_K || t.type == GGUF_TID_Q8_0_ALT || t.type == GGUF_TID_BF16 || t.type == GGUF_TID_F16) {
@@ -526,6 +542,9 @@ void GPT2Model::build_graph(
 
     ggml_tensor* h = ggml_add(ctx0, input_embd, pos_embd);
     // h: ne[0]=N_EMBD, ne[1]=seq_len
+    
+    // [DEBUG] Add log to ensure forward pass graphs compile correctly
+    // std::cout << "[DEBUG] Adding debug markers inside graph." << std::endl;
 
     // Pass through transformer layers
     for (int i = 0; i < N_LAYERS; i++) {
