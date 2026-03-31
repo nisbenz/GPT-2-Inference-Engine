@@ -446,13 +446,13 @@ std::vector<float> GPT2Model::forward(
 
     if (logits_tensor_) {
         // logits_tensor_: ne[0]=VOCAB_SIZE, ne[1]=seq_len
-        // GGML/ggml_cuda uses row-major storage: element [v,s] at offset v * seq_len + s
-        // Last sequence position s = seq_len - 1
+        // GGML uses row-major storage where ne[0] is the fast dimension.
+        // Element [v, s] (where v is vocab index, s is sequence index)
+        // is at offset s * ne[0] + v = s * VOCAB_SIZE + v
         int seq_len = input_ids.size();
         const float* logits_data = (const float*)logits_tensor_->data;
         for (int v = 0; v < VOCAB_SIZE; v++) {
-            // Row-major: offset = v * seq_len + (seq_len - 1)
-            logits[v] = logits_data[v * seq_len + (seq_len - 1)];
+            logits[v] = logits_data[(seq_len - 1) * VOCAB_SIZE + v];
         }
     }
 
@@ -550,21 +550,14 @@ std::vector<int> GPT2Model::generate(
 ) {
     std::vector<int> tokens = prompt_tokens;
 
-    // First forward pass: process the full prompt to populate KV cache
-    // use_cache=true means we'll cache K,V for each layer
+    // First forward pass message
     std::cout << "Processing prompt (" << tokens.size() << " tokens)..." << std::endl;
-    forward(tokens, 0, false);  // position=0 for the first token, disable cache for now
 
-    // Subsequent passes: only process the single new token
-    // KV cache will be used to attend to all previous tokens
+    // Subsequent passes: process the full sequence since KV cache isn't fully implemented
     while ((int)tokens.size() < (int)prompt_tokens.size() + max_new_tokens) {
-        int current_position = tokens.size() - 1;  // Position of the last token in sequence
 
-        // Create single-element vector with just the new token
-        std::vector<int> single_token = {tokens.back()};
-
-        // Forward pass with single token, use_cache=true to use & update KV cache
-        std::vector<float> logits = forward(single_token, current_position, false);  // disable cache for now
+        // Forward pass with full sequence, disable cache
+        std::vector<float> logits = forward(tokens, 0, false);
 
         // Sample next token (use logits directly - they correspond to the single token)
         int next_token = sample(logits, temperature, top_k);
