@@ -260,23 +260,24 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                 size_t expected_nbytes = ggml_nbytes(dst);
                 size_t actual_nbytes = gguf_tensor_nbytes(t);
 
-                // Transpose condition:
-                // GGUF/llama.cpp stores 2D tensors in row-major: [rows, cols]
-                // GGML uses column-major: element [r,c] at data[c*ne[0] + r]
-                //
-                // IMPORTANT: ggml_mul_mat already implicitly transposes its first argument (W^T @ x).
-                // Pre-transposing during loading + ggml_mul_mat's implicit transpose = double transpose = CORRUPTED.
-                //
-                // Only transpose when GGUF file stores [dst_ne[1], dst_ne[0]] which means
-                // the file has the TRANSPOSE of what GGML tensor has.
-                //
-                // Square matrices [N, N]: transpose is identity, skip to avoid corruption.
+                // GGUF stores row-major [rows, cols], GGML uses column-major [cols, rows]
+                // For a tensor with logical shape [rows, cols]:
+                //   GGUF row-major: element [r,c] at data[r*cols + c]
+                //   GGML col-major: element [r,c] at data[c*rows + r]
+                // When rows != cols, these are DIFFERENT memory layouts, so transposition is needed!
                 bool needs_transpose = false;
-                if (t.n_dims == 2 && t.dims[0] != t.dims[1]) {
-                    // Only transpose if NOT square AND dimensions are swapped (file [B,A] -> GGML [A,B])
+                if (t.n_dims == 2) {
                     if (t.dims[0] == (uint64_t)dst->ne[1] && t.dims[1] == (uint64_t)dst->ne[0]) {
+                        // Case 1: GGUF [B,A] -> GGML [A,B] (dimensions swapped) - always transpose
                         needs_transpose = true;
+                    } else if (t.dims[0] == (uint64_t)dst->ne[0] && t.dims[1] == (uint64_t)dst->ne[1]) {
+                        // Case 2: GGUF [A,B] -> GGML [A,B] (dimensions match)
+                        // Only transpose if NOT square (A != B), since square matrices have identical layouts
+                        if (t.dims[0] != t.dims[1]) {
+                            needs_transpose = true;
+                        }
                     }
+                    // If neither condition matches, dimensions don't align - don't transpose
                 }
 
                 if (expected_nbytes == actual_nbytes || t.type == GGUF_TID_Q4_K || t.type == GGUF_TID_Q8_0_ALT || t.type == GGUF_TID_BF16 || t.type == GGUF_TID_F16) {
@@ -303,16 +304,17 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                         std::cout << "  Warning: Q4_K tensor '" << t.name << "' needs dequantization, using random" << std::endl;
                         failed++;
                     } else if (t.type == GGUF_TID_Q8_0_ALT) {
-                        // Q8_0 (type 30): 2-byte scale (int16, little-endian) + 32 int8 values per block
+                        // Q8_0 (type 30): 2-byte scale (float16, little-endian) + 32 int8 values per block
                         std::vector<uint8_t> qdata(actual_nbytes);
                         read_tensor_data(gguf, t, qdata.data(), actual_nbytes);
                         size_t n_blocks = actual_nbytes / 34;  // 2 bytes scale + 32 bytes data
                         size_t j = 0;
                         for (size_t b = 0; b < n_blocks; b++) {
-                            // Read scale as int16 (little-endian), convert to float
-                            int16_t scale_i16 = (int16_t)(qdata[b * 34] | (qdata[b * 34 + 1] << 8));
-                            float scale = (float)scale_i16 / 256.0f;
-                            // Read 32 quantized values
+                            // Read scale as float16 (little-endian), convert to float
+                            uint16_t scale_f16 = (uint16_t)(qdata[b * 34] | (qdata[b * 34 + 1] << 8));
+                            float scale = fp16_to_fp32(scale_f16);
+                            // Read 32 quantized values and dequantize
+                            // Q8_0 uses symmetric quantization: value = quantized_val * scale
                             for (int i = 0; i < 32; i++) {
                                 int8_t val = (int8_t)qdata[b * 34 + 2 + i];
                                 buffer_f[j++] = val * scale;
