@@ -260,23 +260,30 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                 size_t expected_nbytes = ggml_nbytes(dst);
                 size_t actual_nbytes = gguf_tensor_nbytes(t);
 
-                // GGUF stores row-major [rows, cols], GGML uses column-major [cols, rows]
-                // For a tensor with logical shape [rows, cols]:
-                //   GGUF row-major: element [r,c] at data[r*cols + c]
-                //   GGML col-major: element [r,c] at data[c*rows + r]
-                // When rows != cols, these are DIFFERENT memory layouts, so transposition is needed!
+                // GGUF stores tensors as [rows, cols] in row-major format
+                // GGML 2D tensors store as [cols, rows] conceptually but are addressed by ne[]
+                // For ggml_mul_mat: W.ne[0] must match X.ne[0]
+                //
+                // Key insight: For a GGML 2D tensor with ne=(A,B):
+                //   - ne[0]=A is rows, ne[1]=B is cols in GGML addressing
+                //   - But row-major interpretation is (B, A) because column-major storage!
+                //   - When GGUF [rows, cols] matches GGML ne[], the data is already compatible!
+                //
+                // Only transpose when GGUF [rows, cols] matches GGML ne SWAPPED (B, A),
+                // meaning the conversion script explicitly transposed this weight.
                 bool needs_transpose = false;
                 if (t.n_dims == 2) {
                     if (t.dims[0] == (uint64_t)dst->ne[1] && t.dims[1] == (uint64_t)dst->ne[0]) {
-                        // Case 1: GGUF [B,A] -> GGML [A,B] (dimensions swapped) - always transpose
+                        // Case 1: GGUF [B,A] matches GGML ne[0]=A, ne[1]=B
+                        // GGUF [B,A] in row-major = (B,A) matrix = GGML (ne[0], ne[1]) = (A,B) matrix
+                        // But we need (B,A) matrix for ggml_mul_mat, so transpose needed
+                        // This happens when conversion script transposed the weight
                         needs_transpose = true;
-                    } else if (t.dims[0] == (uint64_t)dst->ne[0] && t.dims[1] == (uint64_t)dst->ne[1]) {
-                        // Case 2: GGUF [A,B] -> GGML [A,B] (dimensions match)
-                        // Only transpose if NOT square (A != B), since square matrices have identical layouts
-                        if (t.dims[0] != t.dims[1]) {
-                            needs_transpose = true;
-                        }
                     }
+                    // Case 2: GGUF [A,B] matches GGML ne[0]=A, ne[1]=B
+                    // GGUF [A,B] in row-major = (A,B) matrix = GGML (ne[1], ne[0]) matrix
+                    // For ggml_mul_mat compatibility: we need (B,A) matrix
+                    // But if GGUF already matches ne directly, data is in correct layout - NO transpose
                     // If neither condition matches, dimensions don't align - don't transpose
                 }
 
@@ -520,21 +527,6 @@ void GPT2Model::build_graph(
     ggml_tensor* tokens_tensor = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, seq_len);
     std::memcpy(tokens_tensor->data, input_ids.data(), seq_len * sizeof(int32_t));
 
-    // wte_: ne[0]=N_EMBD, ne[1]=VOCAB_SIZE, stored column-major in GGML
-    // In GGML column-major, element [r, c] is at data[c * ne[0] + r]
-    // For token t, all embedding dimensions are at column t:
-    //   dim 0: data[t * ne[0] + 0]
-    //   dim 1: data[t * ne[0] + 1]
-    //   ...
-    //   dim 767: data[t * ne[0] + 767]
-    // So the embedding for token t is NOT contiguous in memory!
-    //
-    // ggml_get_rows extracts rows 0..ne[1]-1 (the columns in GGML terminology)
-    // For each token index i, it extracts elements [i*ne[0] .. i*ne[0]+ne[0]-1]
-    // which IS the correct embedding for token i!
-    //
-    // So actually ggml_get_rows SHOULD work correctly with column-major storage.
-    // Let me verify this is actually working.
     ggml_tensor* input_embd = ggml_get_rows(ctx0, wte_, tokens_tensor);
 
     // Build positional indices tensor
