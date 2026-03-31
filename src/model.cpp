@@ -434,8 +434,21 @@ std::vector<float> GPT2Model::forward(
         return std::vector<float>();
     }
 
+    // Allocate a temporary ggml context for this forward pass graph
+    struct ggml_init_params params0 = {
+        .mem_size   = 256 * 1024 * 1024,  // 256 MB for the compute graph
+        .mem_buffer = nullptr,
+        .no_alloc   = false,
+    };
+    ggml_context* ctx0 = ggml_init(params0);
+
     // Build computation graph
-    build_graph(input_ids, position, use_cache);
+    build_graph(ctx0, input_ids, position, use_cache);
+    
+    // [DEBUG] Track memory footprint after building the full architecture graph
+    std::cout << "[DEBUG] Forward pass (seq_len=" << input_ids.size() 
+              << ") build complete. ctx0 memory used: " 
+              << ggml_used_mem(ctx0) / (1024.0 * 1024.0) << " MB" << std::endl;
 
     // Compute
     compute();
@@ -456,16 +469,22 @@ std::vector<float> GPT2Model::forward(
         }
     }
 
+    // Free the temporary context
+    ggml_free(ctx0);
+    gf_ = nullptr;
+    logits_tensor_ = nullptr;
+
     return logits;
 }
 
 void GPT2Model::build_graph(
+    ggml_context* ctx0,
     const std::vector<int>& input_ids,
     int position,
     bool use_cache
 ) {
-    // Allocate a fresh computation graph with proper size
-    gf_ = ggml_new_graph(ctx_);
+    // Allocate a fresh computation graph within the local context ctx0
+    gf_ = ggml_new_graph(ctx0);
 
     int seq_len = input_ids.size();
 
@@ -473,18 +492,18 @@ void GPT2Model::build_graph(
     ggml_tensor* input_embd = nullptr;
     for (int i = 0; i < seq_len; i++) {
         // Get embedding for token input_ids[i]
-        ggml_tensor* row = ggml_view_2d(ctx_, wte_, N_EMBD, 1,
+        ggml_tensor* row = ggml_view_2d(ctx0, wte_, N_EMBD, 1,
                                         N_EMBD * sizeof(float),
                                         input_ids[i] * N_EMBD * sizeof(float));
         if (i == 0) {
             input_embd = row;
         } else {
-            input_embd = ggml_concat(ctx_, input_embd, row, 0);
+            input_embd = ggml_concat(ctx0, input_embd, row, 0);
         }
     }
     // input_embd: (seq_len * N_EMBD, 1) = (12288, 1) for seq_len=16
     // Reshape to ne[0]=N_EMBD, ne[1]=seq_len (standard ggml convention)
-    input_embd = ggml_reshape_2d(ctx_, input_embd, N_EMBD, seq_len);
+    input_embd = ggml_reshape_2d(ctx0, input_embd, N_EMBD, seq_len);
 
     // Add positional embeddings
     ggml_tensor* pos_embd = nullptr;
@@ -492,39 +511,39 @@ void GPT2Model::build_graph(
         int pos = position + i;
         if (pos >= CONTEXT_LENGTH) pos = CONTEXT_LENGTH - 1;  // Clip to max
 
-        ggml_tensor* pos_row = ggml_view_2d(ctx_, wpe_, N_EMBD, 1,
+        ggml_tensor* pos_row = ggml_view_2d(ctx0, wpe_, N_EMBD, 1,
                                             N_EMBD * sizeof(float),
                                             pos * N_EMBD * sizeof(float));
         if (i == 0) {
             pos_embd = pos_row;
         } else {
-            pos_embd = ggml_concat(ctx_, pos_embd, pos_row, 0);
+            pos_embd = ggml_concat(ctx0, pos_embd, pos_row, 0);
         }
     }
     // pos_embd: (seq_len * N_EMBD, 1) = (12288, 1)
-    pos_embd = ggml_reshape_2d(ctx_, pos_embd, N_EMBD, seq_len);
+    pos_embd = ggml_reshape_2d(ctx0, pos_embd, N_EMBD, seq_len);
     // pos_embd: ne[0]=N_EMBD, ne[1]=seq_len
 
-    ggml_tensor* h = ggml_add(ctx_, input_embd, pos_embd);
+    ggml_tensor* h = ggml_add(ctx0, input_embd, pos_embd);
     // h: ne[0]=N_EMBD, ne[1]=seq_len
 
     // Pass through transformer layers
     for (int i = 0; i < N_LAYERS; i++) {
         // position is the sequence position of the FIRST token in input_ids
         // When use_cache=true and seq_len=1 (single new token), position is that token's position
-        h = layers_[i].forward(ctx_, gf_, h, position, use_cache);
+        h = layers_[i].forward(ctx0, gf_, h, position, use_cache);
         ggml_build_forward_expand(gf_, h);
     }
 
     // Final layer norm
-    ggml_tensor* h_norm = layer_norm(ctx_, h, ln_f_.gamma, ln_f_.beta, GPT2Config::layer_norm_eps);
+    ggml_tensor* h_norm = layer_norm(ctx0, h, ln_f_.gamma, ln_f_.beta, GPT2Config::layer_norm_eps);
     ggml_build_forward_expand(gf_, h_norm);
 
     // LM head: lm_head^T @ h_norm
     // lm_head: ne[0]=N_EMBD, ne[1]=VOCAB_SIZE; h_norm: ne[0]=N_EMBD, ne[1]=seq_len
     // ggml_mul_mat(lm_head, h_norm) = lm_head^T @ h_norm
     // Result: ne[0]=VOCAB_SIZE, ne[1]=seq_len
-    logits_tensor_ = ggml_mul_mat(ctx_, lm_head_, h_norm);
+    logits_tensor_ = ggml_mul_mat(ctx0, lm_head_, h_norm);
     ggml_build_forward_expand(gf_, logits_tensor_);
 }
 
@@ -561,6 +580,9 @@ std::vector<int> GPT2Model::generate(
 
         // Sample next token (use logits directly - they correspond to the single token)
         int next_token = sample(logits, temperature, top_k);
+
+        // [DEBUG] Check what exactly is being sampled
+        // std::cout << " [Sampled token ID: " << next_token << "] ";
 
         // Check for EOS
         if (next_token == EOS_TOKEN) {

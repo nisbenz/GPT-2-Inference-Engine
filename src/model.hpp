@@ -106,6 +106,7 @@ private:
 
     // Build computation graph for forward pass
     void build_graph(
+        ggml_context* ctx0,
         const std::vector<int>& input_ids,
         int position,
         bool use_cache
