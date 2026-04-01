@@ -8,6 +8,10 @@ add_executable(run_tests
     test_attention.cpp
     test_ffn.cpp
     test_layer_norm.cpp
+    ${CMAKE_SOURCE_DIR}/src/layers.cpp
+    ${CMAKE_SOURCE_DIR}/src/gguf_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/model.cpp
+    ${CMAKE_SOURCE_DIR}/src/tokenizer.cpp
 )
 
 # Link against GGML and pthread
