@@ -33,26 +33,56 @@ set(GGML_BUILD_DIR "${GGML_DIR}/build")
 # Check which libraries actually exist and collect full paths
 # IMPORTANT: Order matters! Dependencies must come BEFORE dependents
 set(GGML_LIBRARIES "")
-if(EXISTS "${GGML_BUILD_DIR}/src/libggml-base.so")
-    list(APPEND GGML_LIBRARIES "${GGML_BUILD_DIR}/src/libggml-base.so")
-    message(STATUS "Using GGML BASE: ${GGML_BUILD_DIR}/src/libggml-base.so")
+
+# Search multiple possible locations for each library
+macro(find_ggml_lib VAR_NAME LIB_NAME)
+    set(${VAR_NAME} "")
+    # Try common locations - libraries may be directly in src/ or in subdirectories
+    set(_search_paths
+        "${GGML_BUILD_DIR}/src/${LIB_NAME}.so"
+        "${GGML_BUILD_DIR}/src/${LIB_NAME}.so.0"
+        "${GGML_BUILD_DIR}/src/${LIB_NAME}/lib${LIB_NAME}.so"
+        "${GGML_BUILD_DIR}/src/${LIB_NAME}/lib${LIB_NAME}.so.0"
+        "${GGML_BUILD_DIR}/src/ggml-cpu/${LIB_NAME}.so"
+        "${GGML_BUILD_DIR}/src/ggml-cpu/${LIB_NAME}.so.0"
+        "${GGML_BUILD_DIR}/src/ggml-cuda/${LIB_NAME}.so"
+        "${GGML_BUILD_DIR}/src/ggml-cuda/${LIB_NAME}.so.0"
+    )
+    foreach(_path ${_search_paths})
+        if(EXISTS "${_path}" AND "${${VAR_NAME}}" STREQUAL "")
+            set(${VAR_NAME} "${_path}")
+            message(STATUS "Found ${LIB_NAME}: ${_path}")
+        endif()
+    endforeach()
+    if("${${VAR_NAME}}" STREQUAL "")
+        message(WARNING "Could not find ${LIB_NAME}")
+    endif()
+endmacro()
+
+find_ggml_lib(GGML_BASE_LIB "libggml-base")
+find_ggml_lib(GGML_CORE_LIB "libggml")
+find_ggml_lib(GGML_CPU_LIB "libggml-cpu")
+find_ggml_lib(GGML_CUDA_LIB "libggml-cuda")
+
+# Add in dependency order (base first, then dependents)
+if(NOT "${GGML_BASE_LIB}" STREQUAL "")
+    list(APPEND GGML_LIBRARIES "${GGML_BASE_LIB}")
 endif()
-if(EXISTS "${GGML_BUILD_DIR}/src/libggml.so")
-    list(APPEND GGML_LIBRARIES "${GGML_BUILD_DIR}/src/libggml.so")
-    message(STATUS "Using GGML: ${GGML_BUILD_DIR}/src/libggml.so")
+if(NOT "${GGML_CORE_LIB}" STREQUAL "")
+    list(APPEND GGML_LIBRARIES "${GGML_CORE_LIB}")
 endif()
-if(EXISTS "${GGML_BUILD_DIR}/src/ggml-cpu/libggml-cpu.so")
-    list(APPEND GGML_LIBRARIES "${GGML_BUILD_DIR}/src/ggml-cpu/libggml-cpu.so")
-    message(STATUS "Using GGML CPU: ${GGML_BUILD_DIR}/src/ggml-cpu/libggml-cpu.so")
+if(NOT "${GGML_CPU_LIB}" STREQUAL "")
+    list(APPEND GGML_LIBRARIES "${GGML_CPU_LIB}")
 endif()
-if(EXISTS "${GGML_BUILD_DIR}/src/ggml-cuda/libggml-cuda.so")
-    list(APPEND GGML_LIBRARIES "${GGML_BUILD_DIR}/src/ggml-cuda/libggml-cuda.so")
-    message(STATUS "Using GGML CUDA: ${GGML_BUILD_DIR}/src/ggml-cuda/libggml-cuda.so")
+if(NOT "${GGML_CUDA_LIB}" STREQUAL "")
+    list(APPEND GGML_LIBRARIES "${GGML_CUDA_LIB}")
 endif()
 
 if(NOT GGML_LIBRARIES)
     message(FATAL_ERROR "No GGML libraries found in ${GGML_BUILD_DIR}/src/")
 endif()
+
+message(STATUS "GGML libraries to link: ${GGML_LIBRARIES}")
 
 # Source files
 file(GLOB SOURCES
