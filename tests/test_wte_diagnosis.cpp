@@ -209,6 +209,14 @@ int test_transposed_embedding_lookup() {
     return 0;
 }
 
+// BF16 to FP32 conversion
+static float bf16_to_fp32(uint16_t bf16) {
+    uint32_t val = (uint32_t)bf16 << 16;
+    float result;
+    std::memcpy(&result, &val, sizeof(float));
+    return result;
+}
+
 // Test actual GGUF file WTE dimensions
 int test_gguf_wte_dims(const char* gguf_path) {
     print_test_header("test_gguf_wte_dims");
@@ -257,6 +265,177 @@ int test_gguf_wte_dims(const char* gguf_path) {
 
     std::cout << "  GGUF WTE dimensions verified" << std::endl;
     return 0;
+}
+
+// Test: Actually load WTE tensor from GGUF and validate data
+int test_gguf_wte_loading(const char* gguf_path) {
+    print_test_header("test_gguf_wte_loading");
+
+    if (!gguf_path) {
+        std::cout << "  No GGUF path provided, skipping file test" << std::endl;
+        return 0;
+    }
+
+    try {
+        GGUFFile gguf = load_gguf(gguf_path);
+
+        std::cout << "  GGUF file: " << gguf_path << std::endl;
+        std::cout << "  Total tensors: " << gguf.tensors.size() << std::endl;
+
+        // Find WTE tensor
+        GGUFTensorInfo* wte_info = nullptr;
+        for (auto& t : gguf.tensors) {
+            if (t.name == "token_embd.weight" || t.name == "wte") {
+                wte_info = &t;
+                std::cout << "  Found tensor: " << t.name << std::endl;
+                std::cout << "    dims: [" << t.dims[0] << ", " << t.dims[1] << "]" << std::endl;
+                std::cout << "    type: " << t.type << " (";
+                switch (t.type) {
+                    case GGUF_TID_F32: std::cout << "F32"; break;
+                    case GGUF_TID_F16: std::cout << "F16"; break;
+                    case GGUF_TID_BF16: std::cout << "BF16"; break;
+                    case GGUF_TID_Q8_0_ALT: std::cout << "Q8_0_ALT"; break;
+                    default: std::cout << "type_" << t.type; break;
+                }
+                std::cout << ")" << std::endl;
+                break;
+            }
+        }
+
+        if (!wte_info) {
+            std::cerr << "  ERROR: token_embd.weight not found in GGUF file!" << std::endl;
+            fclose(gguf.fp);
+            return 1;
+        }
+
+        // Calculate expected size and actual bytes
+        size_t expected_elements = wte_info->dims[0] * wte_info->dims[1];
+        size_t actual_nbytes = gguf_tensor_nbytes(*wte_info);
+        std::cout << "    Expected elements: " << expected_elements << std::endl;
+        std::cout << "    Actual bytes in file: " << actual_nbytes << std::endl;
+
+        // For Q8_0_ALT (type 30), the file actually stores BF16 data (2 bytes per element)
+        // So we read as uint16_t and convert
+        std::vector<float> wte_data(expected_elements);
+        bool read_success = false;
+
+        if (wte_info->type == GGUF_TID_Q8_0_ALT) {
+            // Q8_0_ALT in this file is actually BF16 data (2 bytes/element)
+            std::cout << "  Reading Q8_0_ALT as BF16..." << std::endl;
+            std::vector<uint16_t> bf16_data(actual_nbytes / 2);
+            read_tensor_data(gguf, *wte_info, bf16_data.data(), actual_nbytes);
+            for (size_t i = 0; i < expected_elements && i < bf16_data.size(); i++) {
+                wte_data[i] = bf16_to_fp32(bf16_data[i]);
+            }
+            read_success = true;
+            std::cout << "  Converted " << bf16_data.size() << " BF16 values to float" << std::endl;
+        } else if (wte_info->type == GGUF_TID_BF16) {
+            std::cout << "  Reading BF16..." << std::endl;
+            std::vector<uint16_t> bf16_data(actual_nbytes / 2);
+            read_tensor_data(gguf, *wte_info, bf16_data.data(), actual_nbytes);
+            for (size_t i = 0; i < expected_elements && i < bf16_data.size(); i++) {
+                wte_data[i] = bf16_to_fp32(bf16_data[i]);
+            }
+            read_success = true;
+        } else if (wte_info->type == GGUF_TID_F16) {
+            std::cout << "  Reading F16..." << std::endl;
+            std::vector<uint16_t> f16_data(actual_nbytes / 2);
+            read_tensor_data(gguf, *wte_info, f16_data.data(), actual_nbytes);
+            for (size_t i = 0; i < expected_elements && i < f16_data.size(); i++) {
+                // Simple FP16 to FP32 conversion
+                uint16_t f16 = f16_data[i];
+                unsigned int sign = (f16 >> 15) & 0x1;
+                unsigned int exp = (f16 >> 10) & 0x1f;
+                unsigned int mant = f16 & 0x3ff;
+                if (exp == 0) {
+                    wte_data[i] = sign ? -0.0f : 0.0f;
+                } else if (exp == 31) {
+                    wte_data[i] = sign ? -INFINITY : INFINITY;
+                } else {
+                    int e = (int)exp - 15;
+                    float m = 1.0f + mant / 1024.0f;
+                    wte_data[i] = sign ? -std::pow(2.0f, (float)e) * m : std::pow(2.0f, (float)e) * m;
+                }
+            }
+            read_success = true;
+        } else if (wte_info->type == GGUF_TID_F32) {
+            std::cout << "  Reading F32..." << std::endl;
+            read_tensor_data(gguf, *wte_info, wte_data.data(), actual_nbytes);
+            read_success = true;
+        } else {
+            std::cout << "  Unsupported type: " << wte_info->type << std::endl;
+        }
+
+        fclose(gguf.fp);
+
+        if (!read_success) {
+            std::cerr << "  ERROR: Failed to read tensor data" << std::endl;
+            return 1;
+        }
+
+        // Compute statistics on loaded data
+        float min_val = wte_data[0], max_val = wte_data[0];
+        float abs_sum = 0.0f;
+        size_t zero_count = 0;
+        size_t nan_count = 0;
+        size_t inf_count = 0;
+
+        for (size_t i = 0; i < wte_data.size(); i++) {
+            float v = wte_data[i];
+            if (std::isnan(v)) nan_count++;
+            else if (std::isinf(v)) inf_count++;
+            else {
+                abs_sum += std::abs(v);
+                if (std::abs(v) < 1e-10f) zero_count++;
+                if (v < min_val) min_val = v;
+                if (v > max_val) max_val = v;
+            }
+        }
+
+        std::cout << "\n  WTE Statistics:" << std::endl;
+        std::cout << "    Total elements: " << wte_data.size() << std::endl;
+        std::cout << "    L1 norm (sum of abs): " << abs_sum << std::endl;
+        std::cout << "    Min value: " << min_val << std::endl;
+        std::cout << "    Max value: " << max_val << std::endl;
+        std::cout << "    Zero elements: " << zero_count << " (" << (100.0 * zero_count / wte_data.size()) << "%)" << std::endl;
+        std::cout << "    NaN elements: " << nan_count << std::endl;
+        std::cout << "    Inf elements: " << inf_count << std::endl;
+
+        // Validation checks
+        TEST_ASSERT_MSG(abs_sum > 0.0f, "WTE L1 norm should be > 0 (not all zeros)");
+        TEST_ASSERT_MSG(nan_count == 0, "WTE should have no NaN values");
+        TEST_ASSERT_MSG(inf_count == 0, "WTE should have no Inf values");
+
+        // Check first token embedding (token 0)
+        std::cout << "\n  First token embedding (token 0):" << std::endl;
+        std::cout << "    Elements 0-9: ";
+        for (int i = 0; i < 10; i++) {
+            std::cout << wte_data[i] << " ";
+        }
+        std::cout << std::endl;
+
+        // Check a few tokens to verify different embeddings
+        std::cout << "\n  Sample embeddings:" << std::endl;
+        for (int token_id : {0, 1, 10, 100, 1000}) {
+            float* emb = &wte_data[token_id * 768];  // If dims are [50257, 768]
+            float emb_l1 = 0;
+            for (int i = 0; i < 768; i++) emb_l1 += std::abs(emb[i]);
+            std::cout << "    Token " << token_id << ": L1=" << emb_l1;
+            if (emb_l1 > 0.001f) {
+                std::cout << " (first 5: ";
+                for (int i = 0; i < 5; i++) std::cout << emb[i] << " ";
+                std::cout << ")";
+            }
+            std::cout << std::endl;
+        }
+
+        std::cout << "\n  GGUF WTE loading and validation PASSED" << std::endl;
+        return 0;
+
+    } catch (const std::exception& e) {
+        std::cerr << "  Error loading GGUF: " << e.what() << std::endl;
+        return 1;
+    }
 }
 
 // Test L1 norm calculation for diagnosis
@@ -308,6 +487,7 @@ int run_wte_diagnosis_tests(const char* gguf_path = nullptr) {
     result |= test_transposed_embedding_lookup();
     result |= test_l1_norm_diagnosis();
     result |= test_gguf_wte_dims(gguf_path);
+    result |= test_gguf_wte_loading(gguf_path);
 
     std::cout << "\n========================================" << std::endl;
     if (result == 0) {
