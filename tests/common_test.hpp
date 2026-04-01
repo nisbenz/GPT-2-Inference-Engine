@@ -12,10 +12,9 @@
         return 1; \
     }} while(0)
 
-#define TEST_ASSERT_MSG(condition, msg, ...) \
+#define TEST_ASSERT_MSG(condition, msg) \
     do { if (!(condition)) { \
         std::cerr << "FAIL: " << msg << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
-        std::cerr << "  Additional info: " << __VA_ARGS__ << std::endl; \
         return 1; \
     }} while(0)
 
