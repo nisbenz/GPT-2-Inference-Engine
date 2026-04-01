@@ -448,9 +448,9 @@ std::vector<float> GPT2Model::forward(
 
     // Allocate a temporary ggml context for this forward pass graph
     struct ggml_init_params params0 = {
-        .mem_size   = 256 * 1024 * 1024,  // 256 MB for the compute graph
+        .mem_size   = 1 * 1024 * 1024,  // tiny — just for tensor metadata/graph nodes
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,              // ← required by ggml_backend_alloc_ctx_tensors
     };
     ggml_context* ctx0 = ggml_init(params0);
 
@@ -569,7 +569,6 @@ void GPT2Model::build_graph(
 
 void GPT2Model::compute(ggml_context* ctx0) {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
-
     if (!backend) {
         std::cerr << "Failed to initialize GGML CPU backend" << std::endl;
         return;
@@ -580,7 +579,6 @@ void GPT2Model::compute(ggml_context* ctx0) {
     ggml_backend_graph_compute(backend, gf_);
     ggml_backend_free(backend);
 }
-
 std::vector<int> GPT2Model::generate(
     const std::vector<int>& prompt_tokens,
     int max_new_tokens,
