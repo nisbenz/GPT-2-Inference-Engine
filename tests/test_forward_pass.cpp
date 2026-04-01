@@ -20,7 +20,7 @@ int test_forward_layernorm_identity() {
     struct ggml_init_params params = {
         .mem_size   = 32 * 1024 * 1024,
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,
     };
 
     ggml_context* ctx = ggml_init(params);
@@ -29,30 +29,31 @@ int test_forward_layernorm_identity() {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
     TEST_ASSERT_MSG(backend != nullptr, "Failed to init backend");
 
-    // Input: [n_embd, seq_len] = [4, 2] (small for testing)
-    // Values: all 1.0f
+    // Input: all 1.0f
     ggml_tensor* x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 2);
-    float* x_data = (float*)x->data;
-    for (int i = 0; i < 8; i++) x_data[i] = 1.0f;
-
-    // Gamma: all ones, Beta: all zeros (identity LayerNorm)
     ggml_tensor* gamma = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
     ggml_tensor* beta = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+
+    // Build graph first
+    ggml_tensor* x_norm = ggml_norm(ctx, x, 1e-5f);
+    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
+    ggml_tensor* result = ggml_add(ctx, scaled, beta);
+
+    // Allocate tensors
+    ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+    // Now assign data (after allocation)
+    float* x_data = (float*)x->data;
     float* gamma_data = (float*)gamma->data;
     float* beta_data = (float*)beta->data;
+    for (int i = 0; i < 8; i++) x_data[i] = 1.0f;
     for (int i = 0; i < 4; i++) {
         gamma_data[i] = 1.0f;
         beta_data[i] = 0.0f;
     }
 
-    // Build graph
-    ggml_tensor* x_norm = ggml_norm(ctx, x, 1e-5f);
-    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
-    ggml_tensor* result = ggml_add(ctx, scaled, beta);
-
     compute_graph(ctx, backend, result);
 
-    // For input all 1.0f, LayerNorm of each column should give zeros (since x = mean)
     float* result_data = (float*)result->data;
     std::cout << "  Input all 1s, LayerNorm result (first 4): ";
     for (int i = 0; i < 4; i++) std::cout << result_data[i] << " ";
@@ -76,7 +77,7 @@ int test_simple_matmul() {
     struct ggml_init_params params = {
         .mem_size   = 32 * 1024 * 1024,
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,
     };
 
     ggml_context* ctx = ggml_init(params);
@@ -85,8 +86,8 @@ int test_simple_matmul() {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
     TEST_ASSERT_MSG(backend != nullptr, "Failed to init backend");
 
-    ggml_tensor* W = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3, 2);  // ne[0]=3, ne[1]=2
-    ggml_tensor* x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, 3);    // ne[0]=1, ne[1]=3
+    ggml_tensor* W = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3, 2);
+    ggml_tensor* x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, 3);
 
     std::cout << "  W: ne[0]=" << W->ne[0] << " ne[1]=" << W->ne[1] << std::endl;
     std::cout << "  x: ne[0]=" << x->ne[0] << " ne[1]=" << x->ne[1] << std::endl;
@@ -107,7 +108,7 @@ int test_layernorm_known_values() {
     struct ggml_init_params params = {
         .mem_size   = 32 * 1024 * 1024,
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,
     };
 
     ggml_context* ctx = ggml_init(params);
@@ -116,27 +117,26 @@ int test_layernorm_known_values() {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
     TEST_ASSERT_MSG(backend != nullptr, "Failed to init backend");
 
-    // Input: [2, 4] - 2 tokens, 4-dim embeddings
     ggml_tensor* x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 2);
-    float* x_data = (float*)x->data;
-    // Column 0: [1, 2, 3, 4]
-    x_data[0] = 1; x_data[1] = 2; x_data[2] = 3; x_data[3] = 4;
-    // Column 1: [5, 6, 7, 8]
-    x_data[4] = 5; x_data[5] = 6; x_data[6] = 7; x_data[7] = 8;
-
-    // gamma = ones, beta = zeros
     ggml_tensor* gamma = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
     ggml_tensor* beta = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+
+    ggml_tensor* x_norm = ggml_norm(ctx, x, 1e-5f);
+    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
+    ggml_tensor* result = ggml_add(ctx, scaled, beta);
+
+    ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+    float* x_data = (float*)x->data;
+    x_data[0] = 1; x_data[1] = 2; x_data[2] = 3; x_data[3] = 4;
+    x_data[4] = 5; x_data[5] = 6; x_data[6] = 7; x_data[7] = 8;
+
     float* gamma_data = (float*)gamma->data;
     float* beta_data = (float*)beta->data;
     for (int i = 0; i < 4; i++) {
         gamma_data[i] = 1.0f;
         beta_data[i] = 0.0f;
     }
-
-    ggml_tensor* x_norm = ggml_norm(ctx, x, 1e-5f);
-    ggml_tensor* scaled = ggml_mul(ctx, x_norm, gamma);
-    ggml_tensor* result = ggml_add(ctx, scaled, beta);
 
     compute_graph(ctx, backend, result);
 
@@ -150,7 +150,6 @@ int test_layernorm_known_values() {
     for (int i = 4; i < 8; i++) std::cout << result_data[i] << " ";
     std::cout << std::endl;
 
-    // Expected for col 0: [-1.3416, -0.4472, 0.4472, 1.3416]
     float expected[4] = {-1.3416f, -0.4472f, 0.4472f, 1.3416f};
     for (int j = 0; j < 2; j++) {
         for (int i = 0; i < 4; i++) {
@@ -172,7 +171,7 @@ int test_forward_causal_mask() {
     struct ggml_init_params params = {
         .mem_size   = 32 * 1024 * 1024,
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,
     };
 
     ggml_context* ctx = ggml_init(params);
@@ -181,12 +180,13 @@ int test_forward_causal_mask() {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
     TEST_ASSERT_MSG(backend != nullptr, "Failed to init backend");
 
-    // scores: [seq_len, seq_len] = [3, 3]
     ggml_tensor* scores = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3, 3);
+    ggml_tensor* masked = ggml_diag_mask_inf(ctx, scores, 0);
+
+    ggml_backend_alloc_ctx_tensors(ctx, backend);
+
     float* scores_data = (float*)scores->data;
     for (int i = 0; i < 9; i++) scores_data[i] = 1.0f;
-
-    ggml_tensor* masked = ggml_diag_mask_inf(ctx, scores, 0);
 
     compute_graph(ctx, backend, masked);
 
@@ -200,7 +200,6 @@ int test_forward_causal_mask() {
         std::cout << std::endl;
     }
 
-    // With position=0: col > row means future tokens get -inf
     TEST_ASSERT_FLOAT_EQ(result_data[0], 0.0f, 0.001f);
     TEST_ASSERT_FLOAT_EQ(result_data[1], -INFINITY, 0.001f);
     TEST_ASSERT_FLOAT_EQ(result_data[2], -INFINITY, 0.001f);
@@ -224,7 +223,7 @@ int test_softmax_attention() {
     struct ggml_init_params params = {
         .mem_size   = 32 * 1024 * 1024,
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,
     };
 
     ggml_context* ctx = ggml_init(params);
@@ -234,12 +233,14 @@ int test_softmax_attention() {
     TEST_ASSERT_MSG(backend != nullptr, "Failed to init backend");
 
     ggml_tensor* scores = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3, 3);
+    ggml_tensor* attn_weights = ggml_soft_max(ctx, scores);
+
+    ggml_backend_alloc_ctx_tensors(ctx, backend);
+
     float* scores_data = (float*)scores->data;
     scores_data[0] = 0.0f; scores_data[1] = -INFINITY; scores_data[2] = -INFINITY;
     scores_data[3] = 0.0f; scores_data[4] = 0.0f; scores_data[5] = -INFINITY;
     scores_data[6] = 0.0f; scores_data[7] = 0.0f; scores_data[8] = 0.0f;
-
-    ggml_tensor* attn_weights = ggml_soft_max(ctx, scores);
 
     compute_graph(ctx, backend, attn_weights);
 
@@ -253,17 +254,13 @@ int test_softmax_attention() {
         std::cout << std::endl;
     }
 
-    // Row 0: only col 0 valid -> 1.0
     TEST_ASSERT_FLOAT_EQ(result_data[0], 1.0f, 0.001f);
-    // Row 1: cols 0,1 valid -> 0.5, 0.5
     TEST_ASSERT_FLOAT_EQ(result_data[3], 0.5f, 0.001f);
     TEST_ASSERT_FLOAT_EQ(result_data[4], 0.5f, 0.001f);
-    // Row 2: all valid -> 0.333 each
     TEST_ASSERT_FLOAT_EQ(result_data[6], 1.0f/3.0f, 0.001f);
     TEST_ASSERT_FLOAT_EQ(result_data[7], 1.0f/3.0f, 0.001f);
     TEST_ASSERT_FLOAT_EQ(result_data[8], 1.0f/3.0f, 0.001f);
 
-    // Each row should sum to 1.0
     for (int i = 0; i < 3; i++) {
         float row_sum = result_data[i*3] + result_data[i*3+1] + result_data[i*3+2];
         TEST_ASSERT_FLOAT_EQ(row_sum, 1.0f, 0.001f);
@@ -282,7 +279,7 @@ int test_forward_gelu_activation() {
     struct ggml_init_params params = {
         .mem_size   = 32 * 1024 * 1024,
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,
     };
 
     ggml_context* ctx = ggml_init(params);
@@ -292,12 +289,14 @@ int test_forward_gelu_activation() {
     TEST_ASSERT_MSG(backend != nullptr, "Failed to init backend");
 
     ggml_tensor* x = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 3);
+    ggml_tensor* y = ggml_gelu(ctx, x);
+
+    ggml_backend_alloc_ctx_tensors(ctx, backend);
+
     float* x_data = (float*)x->data;
     x_data[0] = 0.0f;
     x_data[1] = 1.0f;
     x_data[2] = -1.0f;
-
-    ggml_tensor* y = ggml_gelu(ctx, x);
 
     compute_graph(ctx, backend, y);
 
@@ -317,14 +316,14 @@ int test_forward_gelu_activation() {
     return 0;
 }
 
-// Test 7: Full single-layer forward pass with known weights
+// Test 7: Full single-layer forward pass with zero weights
 int test_single_layer_forward() {
     print_test_header("test_single_layer_forward");
 
     struct ggml_init_params params = {
         .mem_size   = 256 * 1024 * 1024,
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,
     };
 
     ggml_context* ctx = ggml_init(params);
@@ -338,56 +337,21 @@ int test_single_layer_forward() {
     const int n_heads = 2;
     const int head_dim = n_embd / n_heads;
 
-    // Input: all zeros
     ggml_tensor* x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, seq_len);
-    float* x_data = (float*)x->data;
-    for (int i = 0; i < n_embd * seq_len; i++) x_data[i] = 0.0f;
-
-    // LN1: gamma=ones, beta=zeros
     ggml_tensor* ln1_gamma = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
     ggml_tensor* ln1_beta = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
-    float* ln1g = (float*)ln1_gamma->data;
-    float* ln1b = (float*)ln1_beta->data;
-    for (int i = 0; i < n_embd; i++) { ln1g[i] = 1.0f; ln1b[i] = 0.0f; }
-
-    // QKV: all zeros
     ggml_tensor* qkv_w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 3 * n_embd);
     ggml_tensor* qkv_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 3 * n_embd);
-    float* qkv_w_data = (float*)qkv_w->data;
-    float* qkv_b_data = (float*)qkv_b->data;
-    for (int i = 0; i < n_embd * 3 * n_embd; i++) qkv_w_data[i] = 0.0f;
-    for (int i = 0; i < 3 * n_embd; i++) qkv_b_data[i] = 0.0f;
-
-    // Proj: zeros
     ggml_tensor* proj_w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_embd);
     ggml_tensor* proj_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
-    float* proj_w_data = (float*)proj_w->data;
-    float* proj_b_data = (float*)proj_b->data;
-    for (int i = 0; i < n_embd * n_embd; i++) proj_w_data[i] = 0.0f;
-    for (int i = 0; i < n_embd; i++) proj_b_data[i] = 0.0f;
-
-    // LN2: gamma=ones, beta=zeros
     ggml_tensor* ln2_gamma = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
     ggml_tensor* ln2_beta = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
-    float* ln2g = (float*)ln2_gamma->data;
-    float* ln2b = (float*)ln2_beta->data;
-    for (int i = 0; i < n_embd; i++) { ln2g[i] = 1.0f; ln2b[i] = 0.0f; }
-
-    // FFN: all zeros
     ggml_tensor* fc_w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_embd * 4);
     ggml_tensor* fc_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd * 4);
     ggml_tensor* proj_ffn_w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd * 4, n_embd);
     ggml_tensor* proj_ffn_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
-    float* fc_w_data = (float*)fc_w->data;
-    float* fc_b_data = (float*)fc_b->data;
-    float* proj_ffn_w_data = (float*)proj_ffn_w->data;
-    float* proj_ffn_b_data = (float*)proj_ffn_b->data;
-    for (int i = 0; i < n_embd * n_embd * 4; i++) fc_w_data[i] = 0.0f;
-    for (int i = 0; i < n_embd * 4; i++) fc_b_data[i] = 0.0f;
-    for (int i = 0; i < n_embd * 4 * n_embd; i++) proj_ffn_w_data[i] = 0.0f;
-    for (int i = 0; i < n_embd; i++) proj_ffn_b_data[i] = 0.0f;
 
-    // Build single transformer layer
+    // Build graph
     ggml_tensor* ln1_out = ggml_norm(ctx, x, 1e-5f);
     ln1_out = ggml_mul(ctx, ln1_out, ln1_gamma);
     ln1_out = ggml_add(ctx, ln1_out, ln1_beta);
@@ -436,6 +400,39 @@ int test_single_layer_forward() {
 
     ggml_tensor* h2 = ggml_add(ctx, h1, down);
 
+    ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+    // Initialize all weights to zero (already zero from alloc, but be explicit)
+    float* x_data = (float*)x->data;
+    for (int i = 0; i < n_embd * seq_len; i++) x_data[i] = 0.0f;
+
+    float* ln1g = (float*)ln1_gamma->data;
+    float* ln1b = (float*)ln1_beta->data;
+    for (int i = 0; i < n_embd; i++) { ln1g[i] = 1.0f; ln1b[i] = 0.0f; }
+
+    float* qkv_w_data = (float*)qkv_w->data;
+    float* qkv_b_data = (float*)qkv_b->data;
+    for (int i = 0; i < n_embd * 3 * n_embd; i++) qkv_w_data[i] = 0.0f;
+    for (int i = 0; i < 3 * n_embd; i++) qkv_b_data[i] = 0.0f;
+
+    float* proj_w_data = (float*)proj_w->data;
+    float* proj_b_data = (float*)proj_b->data;
+    for (int i = 0; i < n_embd * n_embd; i++) proj_w_data[i] = 0.0f;
+    for (int i = 0; i < n_embd; i++) proj_b_data[i] = 0.0f;
+
+    float* ln2g = (float*)ln2_gamma->data;
+    float* ln2b = (float*)ln2_beta->data;
+    for (int i = 0; i < n_embd; i++) { ln2g[i] = 1.0f; ln2b[i] = 0.0f; }
+
+    float* fc_w_data = (float*)fc_w->data;
+    float* fc_b_data = (float*)fc_b->data;
+    float* proj_ffn_w_data = (float*)proj_ffn_w->data;
+    float* proj_ffn_b_data = (float*)proj_ffn_b->data;
+    for (int i = 0; i < n_embd * n_embd * 4; i++) fc_w_data[i] = 0.0f;
+    for (int i = 0; i < n_embd * 4; i++) fc_b_data[i] = 0.0f;
+    for (int i = 0; i < n_embd * 4 * n_embd; i++) proj_ffn_w_data[i] = 0.0f;
+    for (int i = 0; i < n_embd; i++) proj_ffn_b_data[i] = 0.0f;
+
     compute_graph(ctx, backend, h2);
 
     float* result_data = (float*)h2->data;
@@ -464,7 +461,7 @@ int test_ggml_layout() {
     struct ggml_init_params params = {
         .mem_size   = 32 * 1024 * 1024,
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,
     };
 
     ggml_context* ctx = ggml_init(params);
@@ -473,13 +470,9 @@ int test_ggml_layout() {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
     TEST_ASSERT_MSG(backend != nullptr, "Failed to init backend");
 
-    // Create a 2D tensor: 3 rows, 4 cols
     ggml_tensor* t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3, 4);
     std::cout << "  Created tensor with ne[0]=" << t->ne[0] << " ne[1]=" << t->ne[1] << std::endl;
     std::cout << "  nb[0]=" << t->nb[0] << " nb[1]=" << t->nb[1] << std::endl;
-
-    // If GGML is column-major: nb[0] = element_size, nb[1] = nb[0] * ne[0]
-    // If GGML is row-major: nb[0] = element_size * ne[1], nb[1] = element_size
 
     std::cout << "  Expected strides:" << std::endl;
     std::cout << "    Column-major: nb[0]=4, nb[1]=12" << std::endl;
@@ -493,7 +486,13 @@ int test_ggml_layout() {
         std::cout << "  => Unknown layout! nb[0]=" << t->nb[0] << " nb[1]=" << t->nb[1] << std::endl;
     }
 
-    // Fill tensor: t[row, col] = row * 10 + col using actual strides
+    // Extract row 1 (should be [10, 11, 12, 13])
+    ggml_tensor* row_idx = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+    ggml_tensor* row1 = ggml_get_rows(ctx, t, row_idx);
+
+    ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+    // Fill tensor: t[row, col] = row * 10 + col
     float* data = (float*)t->data;
     for (int col = 0; col < 4; col++) {
         for (int row = 0; row < 3; row++) {
@@ -502,12 +501,8 @@ int test_ggml_layout() {
         }
     }
 
-    // Extract row 1 (should be [10, 11, 12, 13])
-    ggml_tensor* row_idx = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
     int32_t* idx = (int32_t*)row_idx->data;
     idx[0] = 1;
-
-    ggml_tensor* row1 = ggml_get_rows(ctx, t, row_idx);
 
     compute_graph(ctx, backend, row1);
 
@@ -535,7 +530,7 @@ int test_forward_embedding_lookup() {
     struct ggml_init_params params = {
         .mem_size   = 32 * 1024 * 1024,
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,
     };
 
     ggml_context* ctx = ggml_init(params);
@@ -547,16 +542,15 @@ int test_forward_embedding_lookup() {
     const int n_embd = 4;
     const int vocab_size = 10;
 
-    // Create WTE tensor with ne[0]=n_embd, ne[1]=vocab_size
     ggml_tensor* wte = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, vocab_size);
-    float* wte_data = (float*)wte->data;
+    ggml_tensor* tokens = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 3);
+    ggml_tensor* embeddings = ggml_get_rows(ctx, wte, tokens);
 
-    // Fill: token t has embedding [t*1000+0, t*1000+1, t*1000+2, t*1000+3]
+    ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+    float* wte_data = (float*)wte->data;
     for (int t = 0; t < vocab_size; t++) {
         for (int i = 0; i < n_embd; i++) {
-            // element [row, col] = data[col * nb[1] + row * nb[0]]
-            // Since nb[0]=4, nb[1]=12 for column-major 3x4 tensor...
-            // For our 4x10 tensor, element [r, c] = data[c * n_embd * 4 + r * 4] / 4
             wte_data[t * n_embd + i] = (float)(t * 1000 + i);
         }
     }
@@ -564,14 +558,10 @@ int test_forward_embedding_lookup() {
     std::cout << "  WTE: ne[0]=" << wte->ne[0] << " ne[1]=" << wte->ne[1] << std::endl;
     std::cout << "  WTE: nb[0]=" << wte->nb[0] << " nb[1]=" << wte->nb[1] << std::endl;
 
-    // Lookup tokens 0, 1, 2
-    ggml_tensor* tokens = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 3);
     int32_t* tokens_data = (int32_t*)tokens->data;
     tokens_data[0] = 0;
     tokens_data[1] = 1;
     tokens_data[2] = 2;
-
-    ggml_tensor* embeddings = ggml_get_rows(ctx, wte, tokens);
 
     compute_graph(ctx, backend, embeddings);
 
@@ -595,7 +585,6 @@ int test_forward_embedding_lookup() {
     }
     std::cout << "(expected: 2000, 2001, 2002, 2003)" << std::endl;
 
-    // Verify
     for (int i = 0; i < n_embd; i++) {
         TEST_ASSERT_FLOAT_EQ(emb_data[i], (float)i, 0.001f);
     }
