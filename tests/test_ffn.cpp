@@ -151,8 +151,8 @@ int test_ffn_forward_structure() {
     };
 
     ggml_context* ctx = ggml_init(params);
-    ggml_cgraph gf = {};
     TEST_ASSERT_MSG(ctx != nullptr, "Failed to init GGML context");
+    ggml_cgraph* gf = ggml_new_graph(ctx);
 
     const int n_embd = 768;
     const int n_ffn = 3072;
@@ -177,7 +177,7 @@ int test_ffn_forward_structure() {
     for (int i = 0; i < n_embd * seq_len; i++) in_data[i] = 1.0f;
 
     // Forward pass
-    ggml_tensor* out = ffn.forward(ctx, &gf, input);
+    ggml_tensor* out = ffn.forward(ctx, gf, input);
 
     std::cout << "  FFN forward output shape: ne[0]=" << out->ne[0] << " ne[1]=" << out->ne[1] << std::endl;
     TEST_ASSERT_INT_EQ(out->ne[0], n_embd);   // Should be n_embd
