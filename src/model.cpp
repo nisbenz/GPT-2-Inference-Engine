@@ -29,6 +29,9 @@ GPT2Model::~GPT2Model() {
     if (ctx_) {
         ggml_free(ctx_);
     }
+    if (backend_) {
+        ggml_backend_free(backend_);
+    }
     if (logits_data_) {
         delete[] logits_data_;
     }

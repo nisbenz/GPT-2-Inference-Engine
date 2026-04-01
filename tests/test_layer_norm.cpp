@@ -1,6 +1,7 @@
 #include "common_test.hpp"
 #include "layers.hpp"
 #include <ggml.h>
+#include <ggml-backend.h>
 #include <cmath>
 
 // Test LayerNorm configuration
@@ -240,22 +241,32 @@ int test_repeat_broadcasting() {
     struct ggml_init_params params = {
         .mem_size   = 16 * 1024 * 1024,
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,
     };
 
     ggml_context* ctx = ggml_init(params);
     TEST_ASSERT_MSG(ctx != nullptr, "Failed to init GGML context");
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
 
     // Beta: [n_embd] = [768]
     ggml_tensor* beta = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 768);
-    float* beta_data = (float*)beta->data;
-    for (int i = 0; i < 768; i++) beta_data[i] = (float)i;
-
     // Input tensor: [n_embd, seq_len] = [768, 4]
     ggml_tensor* input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 768, 4);
 
     // Repeat beta to match input shape
     ggml_tensor* repeated_beta = ggml_repeat(ctx, beta, input);
+
+    // Build and compute graph
+    ggml_cgraph* gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, repeated_beta);
+
+    ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+    // Set beta data
+    float* beta_data = (float*)beta->data;
+    for (int i = 0; i < 768; i++) beta_data[i] = (float)i;
+
+    ggml_backend_graph_compute(backend, gf);
 
     TEST_ASSERT_INT_EQ(repeated_beta->ne[0], 768);
     TEST_ASSERT_INT_EQ(repeated_beta->ne[1], 4);
