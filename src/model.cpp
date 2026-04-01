@@ -384,6 +384,34 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
 
         std::cout << "\nLoaded " << loaded << " tensors, " << failed << " failed/skipped" << std::endl;
 
+        // Debug: verify weights are non-zero
+        {
+            const float* wte_data = (const float*)wte_->data;
+            float wte_sum = 0, wte_max = 0;
+            for (size_t i = 0; i < ggml_nelements(wte_); i++) {
+                wte_sum += std::abs(wte_data[i]);
+                if (std::abs(wte_data[i]) > wte_max) wte_max = std::abs(wte_data[i]);
+            }
+            std::cout << "[DEBUG] WTE: sum=" << wte_sum << " max=" << wte_max << " elements=" << ggml_nelements(wte_) << std::endl;
+
+            if (N_LAYERS > 0) {
+                const float* ln1_gamma = (const float*)layers_[0].ln1.gamma->data;
+                float ln1_sum = 0;
+                for (size_t i = 0; i < ggml_nelements(layers_[0].ln1.gamma); i++) {
+                    ln1_sum += std::abs(ln1_gamma[i]);
+                }
+                std::cout << "[DEBUG] Layer 0 LN1 gamma: sum=" << ln1_sum << " elements=" << ggml_nelements(layers_[0].ln1.gamma) << std::endl;
+
+                const float* qkv_w = (const float*)layers_[0].attention.c_attn_weight->data;
+                float qkv_sum = 0, qkv_max = 0;
+                for (size_t i = 0; i < ggml_nelements(layers_[0].attention.c_attn_weight); i++) {
+                    qkv_sum += std::abs(qkv_w[i]);
+                    if (std::abs(qkv_w[i]) > qkv_max) qkv_max = std::abs(qkv_w[i]);
+                }
+                std::cout << "[DEBUG] Layer 0 QKV weight: sum=" << qkv_sum << " max=" << qkv_max << " elements=" << ggml_nelements(layers_[0].attention.c_attn_weight) << std::endl;
+            }
+        }
+
         fclose(gguf.fp);
         std::cout << "GGUF model loaded successfully" << std::endl;
         return true;
