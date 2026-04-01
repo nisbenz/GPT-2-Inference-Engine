@@ -1,5 +1,5 @@
 *.py
 *.gguf
-*.txt
+merges.txt
 *.json
 /gpt-2
