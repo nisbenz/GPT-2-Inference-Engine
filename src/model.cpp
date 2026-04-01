@@ -80,9 +80,15 @@ bool GPT2Model::init(bool use_gpu) {
     }
     buffer_size += (6 + 12 * N_LAYERS) * 128; // alignment overhead
 
+    // Calculate total tensor count: model tensors + KV cache tensors
+    // Model: 4 base + 12 per layer = 4 + 12*12 = 148
+    // KV cache: 2 per layer = 2*12 = 24
+    // Total: 172, add buffer for safety
+    size_t n_tensors = 4 + 12 * N_LAYERS + 2 * N_LAYERS + 32;
+
     // Initialize GGML context with no_alloc=true
     struct ggml_init_params params = {
-        .mem_size   = ggml_tensor_overhead() * (2 + 6 + 12 * N_LAYERS),
+        .mem_size   = ggml_tensor_overhead() * n_tensors,
         .mem_buffer = nullptr,
         .no_alloc   = true,
     };
