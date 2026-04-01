@@ -4,6 +4,7 @@
 #include "kv_cache.hpp"
 #include "tokenizer.hpp"
 #include <ggml.h>
+#include <ggml-backend.h>
 #include <ggml-impl.h>
 #include <string>
 #include <vector>
@@ -68,9 +69,10 @@ public:
     static constexpr int EOS_TOKEN = 50256;
 
 private:
-    // GGML context and compute graph
+    // GGML context, compute graph, and backend
     ggml_context* ctx_;
     ggml_cgraph* gf_;
+    ggml_backend_t backend_;
     bool use_gpu_;
 
     // Model weights (stored as GGML tensors)

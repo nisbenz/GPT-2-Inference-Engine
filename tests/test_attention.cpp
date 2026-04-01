@@ -248,28 +248,32 @@ int test_softmax() {
     struct ggml_init_params params = {
         .mem_size   = 16 * 1024 * 1024,
         .mem_buffer = nullptr,
-        .no_alloc   = false,
+        .no_alloc   = true,
     };
 
     ggml_context* ctx = ggml_init(params);
     TEST_ASSERT_MSG(ctx != nullptr, "Failed to init GGML context");
+    
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
 
     // Create a simple tensor [1, 3] = [[1.0, 2.0, 3.0]]
     ggml_tensor* x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3, 1);
+    ggml_tensor* result = ggml_soft_max(ctx, x);
+
+    // Build graph
+    ggml_cgraph* gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, result);
+
+    // Allocate tensors correctly in the backend
+    ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+    // Assign data AFTER allocation
     float* data = (float*)x->data;
     data[0] = 1.0f;
     data[1] = 2.0f;
     data[2] = 3.0f;
 
-    ggml_tensor* result = ggml_soft_max(ctx, x);
-
-    // Build and compute graph to get actual results
-    ggml_cgraph* gf = ggml_new_graph(ctx);
-    ggml_build_forward_expand(gf, result);
-
-    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
     if (backend) {
-        ggml_backend_alloc_ctx_tensors(ctx, backend);
         ggml_backend_graph_compute(backend, gf);
         ggml_backend_free(backend);
     }
