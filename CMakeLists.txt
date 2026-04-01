@@ -28,28 +28,26 @@ include_directories(
 
 # Libraries: In GGML 0.10+, the ggml library contains backend registration and device enumeration
 # The libggml.so links to ggml-base and backend libraries
-set(GGML_LIBRARY "${GGML_BUILD_DIR}/src/libggml.so")
-set(GGML_CUDA_LIBRARY "${GGML_BUILD_DIR}/src/ggml-cuda/libggml-cuda.so")
-set(GGML_CPU_LIBRARY "${GGML_BUILD_DIR}/src/ggml-cpu/libggml-cpu.so")
-set(GGML_BASE_LIBRARY "${GGML_BUILD_DIR}/src/libggml-base.so")
+set(GGML_BUILD_DIR "${GGML_DIR}/build")
 
-# Check which libraries actually exist
+# Check which libraries actually exist and collect full paths
+# IMPORTANT: Order matters! Dependencies must come BEFORE dependents
 set(GGML_LIBRARIES "")
-if(EXISTS "${GGML_BASE_LIBRARY}")
-    list(APPEND GGML_LIBRARIES "${GGML_BASE_LIBRARY}")
-    message(STATUS "Using GGML BASE: ${GGML_BASE_LIBRARY}")
+if(EXISTS "${GGML_BUILD_DIR}/src/libggml-base.so")
+    list(APPEND GGML_LIBRARIES "${GGML_BUILD_DIR}/src/libggml-base.so")
+    message(STATUS "Using GGML BASE: ${GGML_BUILD_DIR}/src/libggml-base.so")
 endif()
-if(EXISTS "${GGML_LIBRARY}")
-    list(APPEND GGML_LIBRARIES "${GGML_LIBRARY}")
-    message(STATUS "Using GGML: ${GGML_LIBRARY}")
+if(EXISTS "${GGML_BUILD_DIR}/src/libggml.so")
+    list(APPEND GGML_LIBRARIES "${GGML_BUILD_DIR}/src/libggml.so")
+    message(STATUS "Using GGML: ${GGML_BUILD_DIR}/src/libggml.so")
 endif()
-if(EXISTS "${GGML_CPU_LIBRARY}")
-    list(APPEND GGML_LIBRARIES "${GGML_CPU_LIBRARY}")
-    message(STATUS "Using GGML CPU: ${GGML_CPU_LIBRARY}")
+if(EXISTS "${GGML_BUILD_DIR}/src/ggml-cpu/libggml-cpu.so")
+    list(APPEND GGML_LIBRARIES "${GGML_BUILD_DIR}/src/ggml-cpu/libggml-cpu.so")
+    message(STATUS "Using GGML CPU: ${GGML_BUILD_DIR}/src/ggml-cpu/libggml-cpu.so")
 endif()
-if(EXISTS "${GGML_CUDA_LIBRARY}")
-    list(APPEND GGML_LIBRARIES "${GGML_CUDA_LIBRARY}")
-    message(STATUS "Using GGML CUDA: ${GGML_CUDA_LIBRARY}")
+if(EXISTS "${GGML_BUILD_DIR}/src/ggml-cuda/libggml-cuda.so")
+    list(APPEND GGML_LIBRARIES "${GGML_BUILD_DIR}/src/ggml-cuda/libggml-cuda.so")
+    message(STATUS "Using GGML CUDA: ${GGML_BUILD_DIR}/src/ggml-cuda/libggml-cuda.so")
 endif()
 
 if(NOT GGML_LIBRARIES)
@@ -65,10 +63,13 @@ file(GLOB SOURCES
 add_executable(gpt2 ${SOURCES})
 
 # Link libraries
+target_link_directories(gpt2 PRIVATE ${GGML_BUILD_DIR}/src ${GGML_BUILD_DIR}/src/ggml-cpu ${GGML_BUILD_DIR}/src/ggml-cuda)
 target_link_libraries(gpt2
+    "-Wl,--no-as-needed"
     ${GGML_LIBRARIES}
     ${CUDA_LIBRARIES}
     pthread
+    dl
     m
 )
 
