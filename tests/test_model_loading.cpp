@@ -36,8 +36,8 @@ int test_tensor_shapes() {
     // In GGML 2D tensor: ne[0]=N_EMBD=768, ne[1]=VOCAB_SIZE=50257
     size_t wte_elements = 50257 * 768;
     size_t wte_bytes = wte_elements * sizeof(float);
-    TEST_ASSERT_SIZE_T_EQ(wte_elements, 38597136);  // 50257 * 768
-    TEST_ASSERT_SIZE_T_EQ(wte_bytes, 154388544);     // wte_elements * 4
+    TEST_ASSERT_SIZE_T_EQ(wte_elements, 38597376);  // 50257 * 768
+    TEST_ASSERT_SIZE_T_EQ(wte_bytes, 154389504);     // wte_elements * 4
 
     // Position embeddings: (CONTEXT_LENGTH, N_EMBD) = (1024, 768)
     size_t wpe_elements = 1024 * 768;

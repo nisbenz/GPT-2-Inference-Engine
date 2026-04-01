@@ -44,8 +44,8 @@ int test_bf16_conversion() {
     std::memcpy(&result, &val, sizeof(float));
     TEST_ASSERT_FLOAT_EQ(result, 0.0f, 0.001f);
 
-    // BF16 representation of -1.0f is 0xBFC0
-    bf16_one = 0xBFC0;
+    // BF16 representation of -1.0f is 0xBF80
+    bf16_one = 0xBF80;
     val = (uint32_t)bf16_one << 16;
     std::memcpy(&result, &val, sizeof(float));
     TEST_ASSERT_FLOAT_EQ(result, -1.0f, 0.01f);
