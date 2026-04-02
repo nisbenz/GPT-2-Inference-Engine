@@ -307,26 +307,19 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
             }
 
             if (dst) {
-                // Calculate expected size
                 size_t expected_nbytes = ggml_nbytes(dst);
                 size_t actual_nbytes = t.data_size ? (size_t)t.data_size : gguf_tensor_nbytes(t);
-
-                // GGUF row-major [R, C] and GGML column-major [C, R] have the SAME flat memory layout.
-                // Element (r, c) is at index r*C+c in both formats.
-                // No transpose needed — direct memcpy is correct.
 
                 if (expected_nbytes == actual_nbytes || t.type == GGUF_TID_Q4_K || t.type == GGUF_TID_Q8_0_ALT || t.type == GGUF_TID_BF16 || t.type == GGUF_TID_F16) {
                     
                     std::vector<float> buffer_f(ggml_nelements(dst));
                     bool read_success = false;
 
-                    // Type matches or quantized (will be handled separately)
                     if (t.type == GGUF_TID_F32) {
                         read_tensor_data(gguf, t, buffer_f.data(), actual_nbytes);
                         read_success = true;
                         loaded++;
                     } else if (t.type == GGUF_TID_F16) {
-                        // Convert F16 to F32
                         std::vector<uint16_t> f16_data(actual_nbytes / 2);
                         read_tensor_data(gguf, t, f16_data.data(), actual_nbytes);
                         for (size_t j = 0; j < f16_data.size(); j++) {
@@ -335,13 +328,11 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                         read_success = true;
                         loaded++;
                     } else if (t.type == GGUF_TID_Q4_K) {
-                        // Q4_K_M quantization - needs special dequantization
                         std::cout << "  Warning: Q4_K tensor '" << t.name << "' needs dequantization, using random" << std::endl;
                         failed++;
                     } else if (t.type == GGUF_TID_Q8_0_ALT) {
                         const size_t bf16_nbytes = ggml_nelements(dst) * sizeof(uint16_t);
                         if (actual_nbytes == bf16_nbytes) {
-                            // Some converters tag BF16 payloads as Q8_0_ALT. Detect by actual on-disk size.
                             std::vector<uint16_t> bf16_data(ggml_nelements(dst));
                             read_tensor_data(gguf, t, bf16_data.data(), actual_nbytes);
                             for (size_t j = 0; j < bf16_data.size(); j++) {
@@ -356,7 +347,6 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
                             failed++;
                         }
                     } else if (t.type == GGUF_TID_BF16) {
-                        // BF16 type - convert to F32
                         std::vector<uint16_t> bf16_data(actual_nbytes / 2);
                         read_tensor_data(gguf, t, bf16_data.data(), actual_nbytes);
                         for (size_t j = 0; j < bf16_data.size(); j++) {
@@ -381,34 +371,6 @@ bool GPT2Model::load_gguf_weights(const std::string& path) {
         }
 
         std::cout << "\nLoaded " << loaded << " tensors, " << failed << " failed/skipped" << std::endl;
-
-        // Debug: verify weights are non-zero
-        {
-            const float* wte_data = (const float*)wte_->data;
-            float wte_sum = 0, wte_max = 0;
-            for (size_t i = 0; i < ggml_nelements(wte_); i++) {
-                wte_sum += std::abs(wte_data[i]);
-                if (std::abs(wte_data[i]) > wte_max) wte_max = std::abs(wte_data[i]);
-            }
-            std::cout << "[DEBUG] WTE: sum=" << wte_sum << " max=" << wte_max << " elements=" << ggml_nelements(wte_) << std::endl;
-
-            if (N_LAYERS > 0) {
-                const float* ln1_gamma = (const float*)layers_[0].ln1.gamma->data;
-                float ln1_sum = 0;
-                for (size_t i = 0; i < ggml_nelements(layers_[0].ln1.gamma); i++) {
-                    ln1_sum += std::abs(ln1_gamma[i]);
-                }
-                std::cout << "[DEBUG] Layer 0 LN1 gamma: sum=" << ln1_sum << " elements=" << ggml_nelements(layers_[0].ln1.gamma) << std::endl;
-
-                const float* qkv_w = (const float*)layers_[0].attention.c_attn_weight->data;
-                float qkv_sum = 0, qkv_max = 0;
-                for (size_t i = 0; i < ggml_nelements(layers_[0].attention.c_attn_weight); i++) {
-                    qkv_sum += std::abs(qkv_w[i]);
-                    if (std::abs(qkv_w[i]) > qkv_max) qkv_max = std::abs(qkv_w[i]);
-                }
-                std::cout << "[DEBUG] Layer 0 QKV weight: sum=" << qkv_sum << " max=" << qkv_max << " elements=" << ggml_nelements(layers_[0].attention.c_attn_weight) << std::endl;
-            }
-        }
 
         fclose(gguf.fp);
         std::cout << "GGUF model loaded successfully" << std::endl;
@@ -511,9 +473,8 @@ std::vector<float> GPT2Model::forward(
     struct ggml_tensor* inp_tokens = ggml_graph_get_tensor(gf_, "inp_tokens");
     if (inp_tokens) {
         ggml_backend_tensor_set(inp_tokens, input_ids.data(), 0, seq_len * sizeof(int32_t));
-        std::cout << "[DEBUG] Set inp_tokens, seq_len=" << seq_len << std::endl;
     } else {
-        std::cerr << "[ERROR] inp_tokens not found in graph!" << std::endl;
+        std::cerr << "inp_tokens not found in graph" << std::endl;
     }
 
     struct ggml_tensor* pos_tensor = ggml_graph_get_tensor(gf_, "position");
@@ -542,35 +503,9 @@ std::vector<float> GPT2Model::forward(
 
     struct ggml_tensor* logits_out = ggml_graph_get_tensor(gf_, "logits");
     if (logits_out) {
-        // logits_out: ne[0]=VOCAB_SIZE, ne[1]=seq_len
-        // Get the last token's logits
         ggml_backend_tensor_get(logits_out, logits.data(), (seq_len - 1) * VOCAB_SIZE * sizeof(float), VOCAB_SIZE * sizeof(float));
-        
-        // Debug: check logits
-        float logit_sum = 0, logit_max = -1e30, logit_min = 1e30;
-        int nan_count = 0;
-        for (int i = 0; i < VOCAB_SIZE; i++) {
-            logit_sum += logits[i];
-            if (logits[i] > logit_max) logit_max = logits[i];
-            if (logits[i] < logit_min) logit_min = logits[i];
-            if (std::isnan(logits[i]) || std::isinf(logits[i])) nan_count++;
-        }
-        std::cout << "[DEBUG] Logits: sum=" << logit_sum << " max=" << logit_max << " min=" << logit_min << " nan=" << nan_count << std::endl;
-        
-        // Print top 5 logits
-        std::vector<std::pair<float, int>> top_logits;
-        for (int i = 0; i < VOCAB_SIZE; i++) {
-            top_logits.push_back({logits[i], i});
-        }
-        std::partial_sort(top_logits.begin(), top_logits.begin() + 5, top_logits.end(),
-                         [](const auto& a, const auto& b) { return a.first > b.first; });
-        std::cout << "[DEBUG] Top 5 logits: ";
-        for (int i = 0; i < 5; i++) {
-            std::cout << "token=" << top_logits[i].second << " logit=" << top_logits[i].first << " ";
-        }
-        std::cout << std::endl;
     } else {
-        std::cerr << "[ERROR] logits tensor not found in graph!" << std::endl;
+        std::cerr << "logits tensor not found in graph" << std::endl;
     }
 
     // Free the temporary context and allocator
@@ -649,9 +584,6 @@ std::vector<int> GPT2Model::generate(
 
         // Sample next token (use logits directly - they correspond to the single token)
         int next_token = sample(logits, temperature, top_k);
-
-        // [DEBUG] Check what exactly is being sampled
-        // std::cout << " [Sampled token ID: " << next_token << "] ";
 
         // Check for EOS
         if (next_token == EOS_TOKEN) {
