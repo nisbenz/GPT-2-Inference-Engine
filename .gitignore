@@ -2,4 +2,3 @@
 *.gguf
 merges.txt
 *.json
-/gpt-2
